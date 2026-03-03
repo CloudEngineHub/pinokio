@@ -2263,6 +2263,25 @@ const attach = (event, webContents) => {
     })
   })
 
+  webContents.on('will-prevent-unload', (event) => {
+    const owner = webContents.getOwnerBrowserWindow()
+    const dialogOwner = owner && !owner.isDestroyed() ? owner : null
+    const choice = dialog.showMessageBoxSync(dialogOwner, {
+      type: 'warning',
+      buttons: ['Leave', 'Stay'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Leave this page?',
+      message: 'This page is asking to prevent you from leaving.',
+      detail: 'If you leave, unsaved changes may be lost.',
+      noLink: true
+    })
+    if (choice === 0) {
+      // Ignore the renderer beforeunload cancellation and continue closing.
+      event.preventDefault()
+    }
+  })
+
   webContents.on('will-navigate', (event, url) => {
     if (!webContents.opened) {
       // The first time this view is being used, set the "opened" to true, and don't do anything
