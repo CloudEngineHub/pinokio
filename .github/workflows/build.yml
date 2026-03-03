@@ -285,7 +285,11 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
-          npm ci
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci
+          else
+            npm install
+          fi
           npm run monkeypatch
 
       - name: Install ARM64 parcel watcher native
