@@ -340,7 +340,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.github_token }}
         run: |
           ./node_modules/.bin/electron-builder install-app-deps --platform linux --arch ${{ matrix.arch }}
-          ./node_modules/.bin/electron-builder --linux --${{ matrix.arch }} --publish always
+          ./node_modules/.bin/electron-builder --linux --${{ matrix.arch }} --publish never
 
       - name: Validate ARM64 Linux packaged natives
         if: matrix.arch == 'arm64'
@@ -371,8 +371,7 @@ jobs:
             workdir="$(mktemp -d)"
             dpkg-deb -x "$deb" "$workdir/root"
 
-            wrapper_match_count="$(grep -R --binary-files=without-match -c '/opt/Pinokio/pinokio-bin' "$workdir/root" || true)"
-            if [ "${wrapper_match_count:-0}" -lt 1 ]; then
+            if ! grep -R --binary-files=without-match -q '/opt/Pinokio/pinokio-bin' "$workdir/root"; then
               echo "Could not find /opt/Pinokio/pinokio-bin fallback in extracted package" >&2
               exit 1
             fi
@@ -420,3 +419,28 @@ jobs:
 
             rm -rf "$workdir"
           done
+
+      - name: Upload Linux release artifacts
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find dist-linux -maxdepth 1 -type f \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' -o -name '*linux*.yml' -o -name 'latest*.yml' \) \
+            -print0)
+
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No Linux artifacts found in dist-linux" >&2
+            ls -la dist-linux || true
+            exit 1
+          fi
+
+          gh release upload "$tag" "${files[@]}" --clobber
