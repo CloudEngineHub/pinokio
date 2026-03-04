@@ -1,3 +1,5 @@
+const { BrowserWindow } = require('electron')
+
 const installedSessions = new WeakSet()
 const getterNameToField = (getterName) => {
   const raw = String(getterName || '').slice(3)
@@ -35,11 +37,39 @@ const installWillDownloadEventBridge = ({ webSession }) => {
   }
   installedSessions.add(webSession)
   webSession.on('will-download', (event, item, sourceWebContents) => {
-    if (!sourceWebContents) return
     try {
-      const frameUrl = sourceWebContents.getURL() || ''
-      event.preventDefault()
-      sourceWebContents.send('pinokio:event', {
+      let targetWebContents = (sourceWebContents && !sourceWebContents.isDestroyed())
+        ? sourceWebContents
+        : null
+      if (!targetWebContents) {
+        const focusedWindow = BrowserWindow.getFocusedWindow()
+        const focusedWebContents = focusedWindow && focusedWindow.webContents
+        if (
+          focusedWebContents &&
+          !focusedWebContents.isDestroyed() &&
+          focusedWebContents.session === webSession
+        ) {
+          targetWebContents = focusedWebContents
+        } else {
+          const fallbackWindow = BrowserWindow.getAllWindows().find((win) => {
+            return (
+              win &&
+              win.webContents &&
+              !win.webContents.isDestroyed() &&
+              win.webContents.session === webSession
+            )
+          })
+          targetWebContents = fallbackWindow ? fallbackWindow.webContents : null
+        }
+      }
+      if (!targetWebContents) return
+      if (event && typeof event.preventDefault === 'function') {
+        event.preventDefault()
+      }
+      const frameUrl = (sourceWebContents && !sourceWebContents.isDestroyed())
+        ? (sourceWebContents.getURL() || '')
+        : ''
+      targetWebContents.send('pinokio:event', {
         event: 'electron:session:will-download',
         payload: serializeNativeGetters(item),
         context: { frameUrl }
