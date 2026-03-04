@@ -29,7 +29,7 @@ const serializeNativeGetters = (nativeObject) => {
   return payload
 }
 
-const installWillDownloadEventBridge = ({ webSession, resolveRootUrl }) => {
+const installWillDownloadEventBridge = ({ webSession }) => {
   if (!webSession || installedSessions.has(webSession)) {
     return
   }
@@ -38,8 +38,7 @@ const installWillDownloadEventBridge = ({ webSession, resolveRootUrl }) => {
     if (!sourceWebContents) return
     try {
       const frameUrl = sourceWebContents.getURL() || ''
-      const rootUrl = (typeof resolveRootUrl === 'function') ? (resolveRootUrl() || '') : ''
-      if (!(rootUrl && frameUrl.startsWith(rootUrl))) event.preventDefault()
+      event.preventDefault()
       sourceWebContents.send('pinokio:event', {
         event: 'electron:session:will-download',
         payload: serializeNativeGetters(item),
