@@ -221,6 +221,19 @@ const safeParseUrl = (value, base) => {
     return null
   }
 }
+const installForceDestroyOnClose = (win) => {
+  if (!win || win.__pinokioCloseHandlerInstalled) {
+    return
+  }
+  win.__pinokioCloseHandlerInstalled = true
+  win.once('close', (event) => {
+    if (win.isDestroyed()) {
+      return
+    }
+    event.preventDefault()
+    win.destroy()
+  })
+}
 const resolveConsoleSourceUrl = (sourceId, pageUrl) => {
   const page = safeParseUrl(pageUrl)
   const source = safeParseUrl(sourceId, page ? page.href : undefined)
@@ -2456,7 +2469,7 @@ const attach = (event, webContents) => {
   })
   webContents.setWindowOpenHandler((config) => {
     let url = config.url
-    let features = config.features
+    let features = config.features || ""
     let params = new URLSearchParams(features.split(",").join("&"))
     let win = wc.getOwnerBrowserWindow()
     let [width, height] = win.getSize()
@@ -2712,6 +2725,7 @@ const loadNewWindow = (url, port) => {
       preload: path.join(__dirname, 'preload.js')
     },
   })
+  installForceDestroyOnClose(win)
 
   // Enable screen capture permissions
   win.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
@@ -3033,6 +3047,8 @@ document.querySelector("form").addEventListener("submit", (e) => {
       }
     })
     app.on('browser-window-created', (event, win) => {
+      const parentWindow = (win && typeof win.getParentWindow === 'function') ? win.getParentWindow() : null
+      if (parentWindow && !parentWindow.isDestroyed()) installForceDestroyOnClose(win)
       if (win.type !== "splash") {
         if (win && typeof win.setTitleBarOverlay === 'function') {
           const overlay = titleBarOverlay(colors)

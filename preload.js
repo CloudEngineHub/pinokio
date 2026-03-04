@@ -59,6 +59,19 @@ if (window.parent === window.top) {
 //    }, "*")
 //  }
 //})
+const emitDesktopEvent = (event, payload = {}) => {
+  const target = (window.parent && window.parent !== window)
+    ? window.parent
+    : (window.top || window)
+  target.postMessage({
+    e: 'pinokio:event',
+    event,
+    payload,
+    context: { frameUrl: window.location.href }
+  }, '*')
+  return Promise.resolve({ ok: true, handled: true })
+}
+const emitDownloadEvent = (action, payload) => emitDesktopEvent(`desktop:download-manager-${action}`, payload)
 window.electronAPI = {
   send: (type, msg) => {
     ipcRenderer.send(type, msg)
@@ -69,6 +82,14 @@ window.electronAPI = {
   captureScreenshot: (screenshotRequest) => {
     return ipcRenderer.invoke('pinokio:capture-screenshot-debug', { screenshotRequest })
   },
+  DownloadManager: {
+    startDownload: (url, savePath, filename) => emitDownloadEvent('start', { url, savePath, filename }),
+    pauseDownload: (url) => emitDownloadEvent('pause', { url }),
+    resumeDownload: (url) => emitDownloadEvent('resume', { url }),
+    cancelDownload: (url) => emitDownloadEvent('cancel', { url }),
+    getAllDownloads: async () => [],
+    onDownloadProgress: () => () => {}
+  }
 }
 
 ;(function initUpdateBanner() {
