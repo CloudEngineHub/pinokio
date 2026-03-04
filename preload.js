@@ -59,19 +59,6 @@ if (window.parent === window.top) {
 //    }, "*")
 //  }
 //})
-const emitDesktopEvent = (event, payload = {}) => {
-  const target = (window.parent && window.parent !== window)
-    ? window.parent
-    : (window.top || window)
-  target.postMessage({
-    e: 'pinokio:event',
-    event,
-    payload,
-    context: { frameUrl: window.location.href }
-  }, '*')
-  return Promise.resolve({ ok: true, handled: true })
-}
-const emitDownloadEvent = (action, payload) => emitDesktopEvent(`desktop:download-manager-${action}`, payload)
 window.electronAPI = {
   send: (type, msg) => {
     ipcRenderer.send(type, msg)
@@ -81,16 +68,60 @@ window.electronAPI = {
   stopInspector: () => ipcRenderer.invoke('pinokio:stop-inspector'),
   captureScreenshot: (screenshotRequest) => {
     return ipcRenderer.invoke('pinokio:capture-screenshot-debug', { screenshotRequest })
-  },
-  DownloadManager: {
-    startDownload: (url, savePath, filename) => emitDownloadEvent('start', { url, savePath, filename }),
-    pauseDownload: (url) => emitDownloadEvent('pause', { url }),
-    resumeDownload: (url) => emitDownloadEvent('resume', { url }),
-    cancelDownload: (url) => emitDownloadEvent('cancel', { url }),
-    getAllDownloads: async () => [],
-    onDownloadProgress: () => () => {}
   }
 }
+const toKebab = (value) => String(value || '')
+  .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+  .replace(/[\s_]+/g, '-')
+  .toLowerCase()
+const createElectronApiProxy = (segments = []) => new Proxy(function pinokioElectronApiBridge() {}, {
+  get(_target, prop) {
+    if (prop === 'then') return undefined
+    return createElectronApiProxy([...segments, toKebab(prop)])
+  },
+  apply(_target, _thisArg, args) {
+    if (!segments.length) {
+      return Promise.resolve({ ok: false, handled: false })
+    }
+    const target = (window.parent && window.parent !== window)
+      ? window.parent
+      : (window.top || window)
+    const eventName = `electron:api:${segments.join(':')}`
+    target.postMessage({
+      e: 'pinokio:event',
+      event: eventName,
+      payload: { args },
+      context: { frameUrl: window.location.href }
+    }, '*')
+    return Promise.resolve({ ok: true, handled: true, event: eventName })
+  }
+})
+window.electronAPI = new Proxy(window.electronAPI, {
+  get(target, prop, receiver) {
+    if (Reflect.has(target, prop)) {
+      return Reflect.get(target, prop, receiver)
+    }
+    return createElectronApiProxy([toKebab(prop)])
+  }
+})
+ipcRenderer.on('pinokio:event', (_event, envelope = {}) => {
+  if (!envelope || typeof envelope.event !== 'string') {
+    return
+  }
+  const target = (window.parent && window.parent !== window)
+    ? window.parent
+    : (window.top || window)
+  const context = (envelope.context && typeof envelope.context === 'object') ? envelope.context : {}
+  if (!context.frameUrl) {
+    context.frameUrl = window.location.href
+  }
+  target.postMessage({
+    e: 'pinokio:event',
+    event: envelope.event,
+    payload: (envelope.payload && typeof envelope.payload === 'object') ? envelope.payload : {},
+    context
+  }, '*')
+})
 
 ;(function initUpdateBanner() {
   if (typeof document === 'undefined') {

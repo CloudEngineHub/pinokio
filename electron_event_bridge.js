@@ -1,0 +1,54 @@
+const installedSessions = new WeakSet()
+const getterNameToField = (getterName) => {
+  const raw = String(getterName || '').slice(3)
+  if (!raw) {
+    return ''
+  }
+  const headNormalized = raw.replace(/^[A-Z]{2,}(?=[A-Z][a-z]|$)/, (match) => match.toLowerCase())
+  return headNormalized.charAt(0).toLowerCase() + headNormalized.slice(1)
+}
+
+const serializeNativeGetters = (nativeObject) => {
+  const payload = {}
+  if (!nativeObject || typeof nativeObject !== 'object') return payload
+  const prototype = Object.getPrototypeOf(nativeObject) || {}
+  for (const key of Object.getOwnPropertyNames(prototype)) {
+    if (!/^get[A-Z]/.test(key)) continue
+    const getter = nativeObject[key]
+    if (typeof getter !== 'function' || getter.length !== 0) continue
+    try {
+      const value = getter.call(nativeObject)
+      if (value === undefined || typeof value === 'function') continue
+      JSON.stringify(value)
+      const field = getterNameToField(key)
+      if (!field) continue
+      payload[field] = value
+    } catch (_) {
+    }
+  }
+  return payload
+}
+
+const installWillDownloadEventBridge = ({ webSession, resolveRootUrl }) => {
+  if (!webSession || installedSessions.has(webSession)) {
+    return
+  }
+  installedSessions.add(webSession)
+  webSession.on('will-download', (event, item, sourceWebContents) => {
+    if (!sourceWebContents) return
+    try {
+      const frameUrl = sourceWebContents.getURL() || ''
+      const rootUrl = (typeof resolveRootUrl === 'function') ? (resolveRootUrl() || '') : ''
+      if (!(rootUrl && frameUrl.startsWith(rootUrl))) event.preventDefault()
+      sourceWebContents.send('pinokio:event', {
+        event: 'electron:session:will-download',
+        payload: serializeNativeGetters(item),
+        context: { frameUrl }
+      })
+    } catch (_) {}
+  })
+}
+
+module.exports = {
+  installWillDownloadEventBridge
+}

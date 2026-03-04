@@ -5,6 +5,7 @@ const path = require("path")
 const Pinokiod = require("pinokiod")
 const os = require('os')
 const Updater = require('./updater')
+const { installWillDownloadEventBridge } = require('./electron_event_bridge')
 const is_mac = process.platform.startsWith("darwin")
 const platform = os.platform()
 var mainWindow;
@@ -2241,7 +2242,6 @@ const attach = (event, webContents) => {
       clearBrowserConsoleState(webContents)
     })
   }
-
   // Enable screen capture permissions for all webContents
   webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(true)
@@ -2651,6 +2651,10 @@ const createWindow = (port) => {
       experimentalFeatures: true,
       preload: path.join(__dirname, 'preload.js')
     },
+  })
+  installWillDownloadEventBridge({
+    webSession: session.defaultSession,
+    resolveRootUrl: () => root_url
   })
 
   mainWindow.on('closed', () => {
