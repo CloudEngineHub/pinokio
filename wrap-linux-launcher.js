@@ -1,6 +1,5 @@
 const fs = require('fs')
 const path = require('path')
-
 module.exports = async (context) => {
   const { appOutDir, electronPlatformName, packager } = context
 
