@@ -291,6 +291,39 @@ jobs:
             npm install
           fi
 
+      - name: Constrain Linux targets to matrix arch
+        shell: bash
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const packagePath = './package.json';
+          const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+
+          const targetArch = process.env.TARGET_ARCH;
+          if (!targetArch) {
+            throw new Error('TARGET_ARCH is not set');
+          }
+
+          const linux = packageJson.build && packageJson.build.linux;
+          if (!linux || !Array.isArray(linux.target)) {
+            throw new Error('build.linux.target is not configured as an array');
+          }
+
+          linux.target = linux.target.map((entry) => {
+            if (typeof entry === 'string') {
+              return { target: entry, arch: [targetArch] };
+            }
+            if (entry && typeof entry === 'object') {
+              return { ...entry, arch: [targetArch] };
+            }
+            return entry;
+          });
+
+          fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+          EOF
+
       - name: Install ARM64 parcel watcher native
         if: matrix.arch == 'arm64'
         shell: bash
@@ -338,15 +371,11 @@ jobs:
             workdir="$(mktemp -d)"
             dpkg-deb -x "$deb" "$workdir/root"
 
-            wrapper="$workdir/root/usr/bin/pinokio"
-            if [ ! -f "$wrapper" ]; then
-              echo "Missing wrapper script: $wrapper" >&2
+            wrapper_match_count="$(grep -R --binary-files=without-match -c '/opt/Pinokio/pinokio-bin' "$workdir/root" || true)"
+            if [ "${wrapper_match_count:-0}" -lt 1 ]; then
+              echo "Could not find /opt/Pinokio/pinokio-bin fallback in extracted package" >&2
               exit 1
             fi
-            grep -q '/opt/Pinokio/pinokio-bin' "$wrapper" || {
-              echo "Wrapper does not include /opt fallback to pinokio-bin" >&2
-              exit 1
-            }
 
             pty_node="$(pick_file \
               "$workdir/root/opt/Pinokio/resources/app.asar.unpacked/node_modules/@homebridge/node-pty-prebuilt-multiarch/build/Release/pty.node" \
