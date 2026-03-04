@@ -24,7 +24,33 @@ module.exports = async (context) => {
   const wrapperScript = `#!/usr/bin/env sh
 export ELECTRON_OZONE_PLATFORM_HINT=x11
 export ELECTRON_DISABLE_GPU=1
-exec "$(dirname "$0")/${exeName}-bin" --ozone-platform=x11 --disable-gpu --disable-gpu-sandbox "$@"
+SCRIPT_PATH="$0"
+RESOLVED_PATH=""
+
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED_PATH="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || true)"
+fi
+
+if [ -z "$RESOLVED_PATH" ] && command -v realpath >/dev/null 2>&1; then
+  RESOLVED_PATH="$(realpath "$SCRIPT_PATH" 2>/dev/null || true)"
+fi
+
+if [ -n "$RESOLVED_PATH" ]; then
+  SCRIPT_DIR="$(dirname "$RESOLVED_PATH")"
+else
+  SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+fi
+
+OPT_BIN="/opt/Pinokio/${exeName}-bin"
+LOCAL_BIN="$SCRIPT_DIR/${exeName}-bin"
+
+if [ -x "$OPT_BIN" ]; then
+  TARGET_BIN="$OPT_BIN"
+else
+  TARGET_BIN="$LOCAL_BIN"
+fi
+
+exec "$TARGET_BIN" --ozone-platform=x11 --disable-gpu --disable-gpu-sandbox "$@"
 `
 
   fs.writeFileSync(exePath, wrapperScript, { mode: originalStat.mode || 0o755 })
