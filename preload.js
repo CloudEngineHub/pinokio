@@ -4,19 +4,17 @@ window.prompt = function(title, val){
   return ipcRenderer.sendSync('prompt', {title, val})
 }
 try {
-  console.log('[pinokio][preload] boot', {
-    href: window.location.href,
-    isTop: window.top === window,
-    hasParent: window.parent && window.parent !== window
-  })
 } catch (_) {
 }
 const sendPinokio = (action) => {
-  console.log("window.parent == window.top?", window.parent === window.top, action, location.href)
-  if (window.parent === window.top) {
-    window.parent.postMessage({
-      action
-    }, "*")
+  if (!action) {
+    return
+  }
+  try {
+    if (window.parent === window.top) {
+      window.parent.postMessage({ action }, "*")
+    }
+  } catch (_) {
   }
 }
 
@@ -29,24 +27,36 @@ try {
   isDirectChildFrame = false
 }
 if (isDirectChildFrame) {
-  let prevUrl = document.location.href
+  let previousUrl = document.location.href
+  const publishLocation = () => {
+    const currentUrl = document.location.href
+    if (currentUrl === previousUrl) {
+      return
+    }
+    previousUrl = currentUrl
+    sendPinokio({
+      type: "location",
+      url: currentUrl
+    })
+  }
   sendPinokio({
     type: "location",
-    url: prevUrl
+    url: previousUrl
   })
-  setInterval(() => {
-    const currUrl = document.location.href;
-//    console.log({ currUrl, prevUrl })
-    if (currUrl != prevUrl) {
-      // URL changed
-      prevUrl = currUrl;
-      console.log(`URL changed to : ${currUrl}`);
-      sendPinokio({
-        type: "location",
-        url: currUrl
-      })
-    }
-  }, 100);
+  const originalPushState = history.pushState
+  history.pushState = function pushStateWithPinokioLocation(...args) {
+    const result = originalPushState.apply(this, args)
+    publishLocation()
+    return result
+  }
+  const originalReplaceState = history.replaceState
+  history.replaceState = function replaceStateWithPinokioLocation(...args) {
+    const result = originalReplaceState.apply(this, args)
+    publishLocation()
+    return result
+  }
+  window.addEventListener("popstate", publishLocation)
+  window.addEventListener("hashchange", publishLocation)
   window.addEventListener("message", (event) => {
     if (event.data) {
       if (event.data.action === "back") {
@@ -99,17 +109,6 @@ const emitPinokioEvent = (eventName, payload = {}, context = {}) => {
       nextContext.workspace = workspaceHint
     }
   }
-  if (eventName === 'desktop:dom:download') {
-    try {
-      console.log('[pinokio][preload] emit pinokio:event', {
-        event: eventName,
-        frameUrl: nextContext.frameUrl,
-        payloadKeys: (payload && typeof payload === 'object') ? Object.keys(payload) : [],
-        source: payload && payload.source ? payload.source : ''
-      })
-    } catch (_) {
-    }
-  }
   target.postMessage({
     e: 'pinokio:event',
     event: eventName,
@@ -123,18 +122,6 @@ window.$pinokio = Object.freeze({
       return { ok: false, handled: false, reason: 'invalid_event_name' }
     }
     const normalizedEvent = eventName.trim()
-    if (normalizedEvent === 'desktop:dom:download') {
-      try {
-        console.log('[pinokio][preload] $pinokio.emit', {
-          event: normalizedEvent,
-          frameUrl: window.location.href,
-          url: payload && payload.url,
-          savePath: payload && payload.savePath,
-          filename: payload && payload.filename
-        })
-      } catch (_) {
-      }
-    }
     emitPinokioEvent(
       normalizedEvent,
       (payload && typeof payload === 'object') ? payload : {},
@@ -254,10 +241,6 @@ const loadPinokioInjectScript = async (sourceUrlRaw) => {
     }
     const source = await response.text()
     ;(0, eval)(`${source}\n//# sourceURL=${sourceUrl}`)
-    try {
-      console.log('[pinokio][preload] inject script loaded', { sourceUrl })
-    } catch (_) {
-    }
     return true
   } catch (error) {
     try {
@@ -281,14 +264,6 @@ const requestPinokioInjectScripts = () => {
     currentUrl: referrerUrl,
     referrerUrl,
     workspace: workspaceHint || undefined
-  }
-  try {
-    console.log('[pinokio][preload] inject request', {
-      frameUrl: context.frameUrl,
-      pageUrl: context.pageUrl,
-      workspace: context.workspace || ''
-    })
-  } catch (_) {
   }
   if (!window.parent || window.parent === window) {
     return
@@ -321,14 +296,6 @@ if (window.parent && window.parent !== window) {
     const scripts = Array.isArray(data.scripts) ? data.scripts : []
     if (!scripts.length) {
       return
-    }
-    try {
-      console.log('[pinokio][preload] inject scripts', {
-        frameUrl: window.location.href,
-        count: scripts.length,
-        scripts
-      })
-    } catch (_) {
     }
     Promise.all(scripts.map((item) => loadPinokioInjectScript(item))).catch(() => {})
   })
