@@ -87,9 +87,7 @@ const createElectronApiProxy = (segments = []) => new Proxy(function pinokioElec
     if (!segments.length) {
       return Promise.resolve({ ok: false, handled: false })
     }
-    const target = (window.parent && window.parent !== window)
-      ? window.parent
-      : (window.top || window)
+    const target = window.top || window
     const eventName = `electron:api:${segments.join(':')}`
     target.postMessage({
       e: 'pinokio:event',
@@ -112,9 +110,7 @@ ipcRenderer.on('pinokio:event', (_event, envelope = {}) => {
   if (!envelope || typeof envelope.event !== 'string') {
     return
   }
-  const target = (window.parent && window.parent !== window)
-    ? window.parent
-    : (window.top || window)
+  const target = window.top || window
   const context = (envelope.context && typeof envelope.context === 'object') ? envelope.context : {}
   if (!context.frameUrl) {
     context.frameUrl = window.location.href
