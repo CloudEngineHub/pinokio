@@ -5,7 +5,6 @@ const path = require("path")
 const Pinokiod = require("pinokiod")
 const os = require('os')
 const Updater = require('./updater')
-const { installWillDownloadEventBridge } = require('./electron_event_bridge')
 const is_mac = process.platform.startsWith("darwin")
 const platform = os.platform()
 var mainWindow;
@@ -2637,11 +2636,6 @@ const createWindow = (port) => {
       preload: path.join(__dirname, 'preload.js')
     },
   })
-  installWillDownloadEventBridge({
-    webSession: session.defaultSession,
-    resolveRootUrl: () => root_url
-  })
-
   mainWindow.on('closed', () => {
     mainWindow = null
   })

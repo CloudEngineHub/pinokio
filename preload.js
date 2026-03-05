@@ -3,6 +3,14 @@ const { ipcRenderer, } = require('electron')
 window.prompt = function(title, val){
   return ipcRenderer.sendSync('prompt', {title, val})
 }
+try {
+  console.log('[pinokio][preload] boot', {
+    href: window.location.href,
+    isTop: window.top === window,
+    hasParent: window.parent && window.parent !== window
+  })
+} catch (_) {
+}
 const sendPinokio = (action) => {
   console.log("window.parent == window.top?", window.parent === window.top, action, location.href)
   if (window.parent === window.top) {
@@ -74,10 +82,6 @@ window.electronAPI = {
     return ipcRenderer.invoke('pinokio:capture-screenshot-debug', { screenshotRequest })
   }
 }
-const toKebab = (value) => String(value || '')
-  .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
-  .replace(/[\s_]+/g, '-')
-  .toLowerCase()
 const resolvePinokioTargetWindow = () => (
   (window.parent && window.parent !== window)
     ? window.parent
@@ -89,6 +93,23 @@ const emitPinokioEvent = (eventName, payload = {}, context = {}) => {
   if (!nextContext.frameUrl) {
     nextContext.frameUrl = window.location.href
   }
+  if (!nextContext.workspace) {
+    const workspaceHint = resolvePinokioWorkspaceHint()
+    if (workspaceHint) {
+      nextContext.workspace = workspaceHint
+    }
+  }
+  if (eventName === 'desktop:dom:download') {
+    try {
+      console.log('[pinokio][preload] emit pinokio:event', {
+        event: eventName,
+        frameUrl: nextContext.frameUrl,
+        payloadKeys: (payload && typeof payload === 'object') ? Object.keys(payload) : [],
+        source: payload && payload.source ? payload.source : ''
+      })
+    } catch (_) {
+    }
+  }
   target.postMessage({
     e: 'pinokio:event',
     event: eventName,
@@ -96,119 +117,227 @@ const emitPinokioEvent = (eventName, payload = {}, context = {}) => {
     context: nextContext
   }, '*')
 }
-const isHttpUrl = (value) => {
+window.$pinokio = Object.freeze({
+  emit: (eventName, payload = {}, context = {}) => {
+    if (typeof eventName !== 'string' || !eventName.trim()) {
+      return { ok: false, handled: false, reason: 'invalid_event_name' }
+    }
+    const normalizedEvent = eventName.trim()
+    if (normalizedEvent === 'desktop:dom:download') {
+      try {
+        console.log('[pinokio][preload] $pinokio.emit', {
+          event: normalizedEvent,
+          frameUrl: window.location.href,
+          url: payload && payload.url,
+          savePath: payload && payload.savePath,
+          filename: payload && payload.filename
+        })
+      } catch (_) {
+      }
+    }
+    emitPinokioEvent(
+      normalizedEvent,
+      (payload && typeof payload === 'object') ? payload : {},
+      (context && typeof context === 'object') ? context : {}
+    )
+    return { ok: true, handled: true, event: normalizedEvent }
+  }
+})
+const pinokioInjectedScripts = new Set()
+const resolvePinokioHostOrigin = () => {
+  try {
+    if (typeof document !== 'undefined' && document.referrer) {
+      return new URL(document.referrer).origin
+    }
+  } catch (_) {
+  }
+  try {
+    return new URL(window.location.href).origin
+  } catch (_) {
+  }
+  return ''
+}
+const extractWorkspaceFromPathname = (pathname) => {
+  if (typeof pathname !== 'string') {
+    return ''
+  }
+  const value = pathname.trim()
+  if (!value) {
+    return ''
+  }
+  const patterns = [
+    /^\/pinokio\/([^/?#]+)/i,
+    /^\/p\/([^/?#]+)/i,
+    /^\/api\/([^/?#]+)/i,
+    /^\/_api\/([^/?#]+)/i,
+    /^\/raw\/api\/([^/?#]+)/i,
+    /^\/asset\/api\/([^/?#]+)/i,
+    /^\/files\/api\/([^/?#]+)/i,
+    /^\/env\/api\/([^/?#]+)/i,
+    /^\/run\/api\/([^/?#]+)/i,
+  ]
+  for (const pattern of patterns) {
+    const match = value.match(pattern)
+    if (!match || !match[1]) {
+      continue
+    }
+    try {
+      return decodeURIComponent(match[1]).trim()
+    } catch (_) {
+      return String(match[1] || '').trim()
+    }
+  }
+  return ''
+}
+const resolvePinokioWorkspaceHint = () => {
+  const candidates = []
+  try {
+    const ref = (typeof document !== 'undefined' && document.referrer) ? document.referrer : ''
+    if (ref) {
+      candidates.push(ref)
+    }
+  } catch (_) {
+  }
+  try {
+    candidates.push(window.location.href)
+  } catch (_) {
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || !candidate.trim()) {
+      continue
+    }
+    try {
+      const parsed = new URL(candidate, 'http://localhost')
+      const workspaceQueryHint = (parsed.searchParams.get('__pinokio_workspace') || parsed.searchParams.get('workspace') || '').trim()
+      if (workspaceQueryHint) {
+        return workspaceQueryHint
+      }
+      const workspace = extractWorkspaceFromPathname(parsed.pathname || '')
+      if (workspace) {
+        return workspace
+      }
+    } catch (_) {
+      const workspace = extractWorkspaceFromPathname(candidate)
+      if (workspace) {
+        return workspace
+      }
+    }
+  }
+  return ''
+}
+const resolvePinokioInjectScriptUrl = (value) => {
   if (typeof value !== 'string') {
-    return false
+    return ''
   }
   const trimmed = value.trim()
   if (!trimmed) {
+    return ''
+  }
+  const baseOrigin = resolvePinokioHostOrigin() || window.location.origin
+  try {
+    return new URL(trimmed, `${baseOrigin}/`).toString()
+  } catch (_) {
+    return ''
+  }
+}
+const loadPinokioInjectScript = async (sourceUrlRaw) => {
+  const sourceUrl = resolvePinokioInjectScriptUrl(sourceUrlRaw)
+  if (!sourceUrl || pinokioInjectedScripts.has(sourceUrl)) {
     return false
   }
+  pinokioInjectedScripts.add(sourceUrl)
   try {
-    const parsed = new URL(trimmed, window.location.href)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-  } catch (_) {
+    const response = await fetch(sourceUrl)
+    if (!response || !response.ok) {
+      const status = response ? response.status : 'unknown'
+      throw new Error(`fetch_failed:${status}`)
+    }
+    const source = await response.text()
+    ;(0, eval)(`${source}\n//# sourceURL=${sourceUrl}`)
+    try {
+      console.log('[pinokio][preload] inject script loaded', { sourceUrl })
+    } catch (_) {
+    }
+    return true
+  } catch (error) {
+    try {
+      console.warn('[pinokio][preload] inject script load failed', {
+        sourceUrlRaw,
+        sourceUrl,
+        error: error && error.message ? error.message : String(error)
+      })
+    } catch (_) {
+    }
+    pinokioInjectedScripts.delete(sourceUrl)
     return false
   }
 }
-const deriveDownloadMetaFromUrl = (value) => {
-  const meta = {
-    filename: '',
-    savePath: ''
-  }
-  if (!isHttpUrl(value)) {
-    return meta
+const requestPinokioInjectScripts = () => {
+  const referrerUrl = (typeof document !== 'undefined' && document.referrer) ? document.referrer : ''
+  const workspaceHint = resolvePinokioWorkspaceHint()
+  const context = {
+    frameUrl: window.location.href,
+    pageUrl: referrerUrl,
+    currentUrl: referrerUrl,
+    referrerUrl,
+    workspace: workspaceHint || undefined
   }
   try {
-    const parsed = new URL(value, window.location.href)
-    const parts = parsed.pathname.split('/').filter(Boolean)
-    const last = parts.length ? parts[parts.length - 1] : ''
-    if (last) {
-      meta.filename = decodeURIComponent(last)
-    }
-    const splitFilesIndex = parts.lastIndexOf('split_files')
-    if (splitFilesIndex >= 0 && parts[splitFilesIndex + 1]) {
-      meta.savePath = decodeURIComponent(parts[splitFilesIndex + 1])
-    }
+    console.log('[pinokio][preload] inject request', {
+      frameUrl: context.frameUrl,
+      pageUrl: context.pageUrl,
+      workspace: context.workspace || ''
+    })
   } catch (_) {
   }
-  return meta
-}
-const installDomDownloadBridge = () => {
-  if (window.__pinokioDomDownloadBridgeInstalled) {
-    return
-  }
-  window.__pinokioDomDownloadBridgeInstalled = true
-  // Only bridge embedded app frames; keep top-level Pinokio page unchanged.
   if (!window.parent || window.parent === window) {
     return
   }
-  const anchorProto = window.HTMLAnchorElement && window.HTMLAnchorElement.prototype
-  if (!anchorProto || typeof anchorProto.click !== 'function') {
-    return
-  }
-  const nativeAnchorClick = anchorProto.click
+  const targetWindow = resolvePinokioTargetWindow()
   try {
-    anchorProto.click = function pinokioDomDownloadAnchorClickBridge(...args) {
-      try {
-        const href = typeof this.href === 'string' ? this.href.trim() : ''
-        const hasDownloadAttr = this.hasAttribute && this.hasAttribute('download')
-        if (hasDownloadAttr && isHttpUrl(href)) {
-          const downloadMeta = deriveDownloadMetaFromUrl(href)
-          const filename = typeof this.download === 'string' ? this.download.trim() : ''
-          const target = typeof this.target === 'string' ? this.target.trim() : ''
-          emitPinokioEvent('desktop:dom:download', {
-            url: href,
-            filename: filename || downloadMeta.filename || undefined,
-            savePath: downloadMeta.savePath || undefined,
-            target: target || undefined,
-            source: 'anchor-click'
-          })
-        }
-      } catch (_) {
-      }
-      return nativeAnchorClick.apply(this, args)
-    }
+    targetWindow.postMessage({
+      e: 'pinokio:inject:request',
+      context
+    }, '*')
   } catch (_) {
   }
 }
-const createElectronApiProxy = (segments = []) => new Proxy(function pinokioElectronApiBridge() {}, {
-  get(_target, prop) {
-    if (prop === 'then') return undefined
-    return createElectronApiProxy([...segments, toKebab(prop)])
-  },
-  apply(_target, _thisArg, args) {
-    if (!segments.length) {
-      return Promise.resolve({ ok: false, handled: false })
+if (window.parent && window.parent !== window) {
+  window.addEventListener('message', (event) => {
+    if (!event) {
+      return
     }
-    const eventName = `electron:api:${segments.join(':')}`
-    emitPinokioEvent(eventName, { args }, { frameUrl: window.location.href })
-    return Promise.resolve({ ok: true, handled: true, event: eventName })
-  }
-})
-window.electronAPI = new Proxy(window.electronAPI, {
-  get(target, prop, receiver) {
-    if (Reflect.has(target, prop)) {
-      return Reflect.get(target, prop, receiver)
+    const validSource = (
+      event.source === window.parent ||
+      (window.top && event.source === window.top)
+    )
+    if (!validSource) {
+      return
     }
-    return createElectronApiProxy([toKebab(prop)])
+    const data = event.data
+    if (!data || data.e !== 'pinokio:inject:load') {
+      return
+    }
+    const scripts = Array.isArray(data.scripts) ? data.scripts : []
+    if (!scripts.length) {
+      return
+    }
+    try {
+      console.log('[pinokio][preload] inject scripts', {
+        frameUrl: window.location.href,
+        count: scripts.length,
+        scripts
+      })
+    } catch (_) {
+    }
+    Promise.all(scripts.map((item) => loadPinokioInjectScript(item))).catch(() => {})
+  })
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', requestPinokioInjectScripts, { once: true })
+  } else {
+    requestPinokioInjectScripts()
   }
-})
-installDomDownloadBridge()
-ipcRenderer.on('pinokio:event', (_event, envelope = {}) => {
-  if (!envelope || typeof envelope.event !== 'string') {
-    return
-  }
-  const context = (envelope.context && typeof envelope.context === 'object') ? envelope.context : {}
-  if (!context.frameUrl) {
-    context.frameUrl = window.location.href
-  }
-  emitPinokioEvent(
-    envelope.event,
-    (envelope.payload && typeof envelope.payload === 'object') ? envelope.payload : {},
-    context
-  )
-})
+}
 
 ;(function initUpdateBanner() {
   if (typeof document === 'undefined') {
