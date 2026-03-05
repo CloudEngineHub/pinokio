@@ -78,6 +78,100 @@ const toKebab = (value) => String(value || '')
   .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
   .replace(/[\s_]+/g, '-')
   .toLowerCase()
+const resolvePinokioTargetWindow = () => (
+  (window.parent && window.parent !== window)
+    ? window.parent
+    : (window.top || window)
+)
+const emitPinokioEvent = (eventName, payload = {}, context = {}) => {
+  const target = resolvePinokioTargetWindow()
+  const nextContext = (context && typeof context === 'object') ? { ...context } : {}
+  if (!nextContext.frameUrl) {
+    nextContext.frameUrl = window.location.href
+  }
+  target.postMessage({
+    e: 'pinokio:event',
+    event: eventName,
+    payload: (payload && typeof payload === 'object') ? payload : {},
+    context: nextContext
+  }, '*')
+}
+const isHttpUrl = (value) => {
+  if (typeof value !== 'string') {
+    return false
+  }
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return false
+  }
+  try {
+    const parsed = new URL(trimmed, window.location.href)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch (_) {
+    return false
+  }
+}
+const deriveDownloadMetaFromUrl = (value) => {
+  const meta = {
+    filename: '',
+    savePath: ''
+  }
+  if (!isHttpUrl(value)) {
+    return meta
+  }
+  try {
+    const parsed = new URL(value, window.location.href)
+    const parts = parsed.pathname.split('/').filter(Boolean)
+    const last = parts.length ? parts[parts.length - 1] : ''
+    if (last) {
+      meta.filename = decodeURIComponent(last)
+    }
+    const splitFilesIndex = parts.lastIndexOf('split_files')
+    if (splitFilesIndex >= 0 && parts[splitFilesIndex + 1]) {
+      meta.savePath = decodeURIComponent(parts[splitFilesIndex + 1])
+    }
+  } catch (_) {
+  }
+  return meta
+}
+const installDomDownloadBridge = () => {
+  if (window.__pinokioDomDownloadBridgeInstalled) {
+    return
+  }
+  window.__pinokioDomDownloadBridgeInstalled = true
+  // Only bridge embedded app frames; keep top-level Pinokio page unchanged.
+  if (!window.parent || window.parent === window) {
+    return
+  }
+  const anchorProto = window.HTMLAnchorElement && window.HTMLAnchorElement.prototype
+  if (!anchorProto || typeof anchorProto.click !== 'function') {
+    return
+  }
+  const nativeAnchorClick = anchorProto.click
+  try {
+    anchorProto.click = function pinokioDomDownloadAnchorClickBridge(...args) {
+      try {
+        const href = typeof this.href === 'string' ? this.href.trim() : ''
+        const hasDownloadAttr = this.hasAttribute && this.hasAttribute('download')
+        if (hasDownloadAttr && isHttpUrl(href)) {
+          const downloadMeta = deriveDownloadMetaFromUrl(href)
+          const filename = typeof this.download === 'string' ? this.download.trim() : ''
+          const target = typeof this.target === 'string' ? this.target.trim() : ''
+          emitPinokioEvent('desktop:dom:download', {
+            url: href,
+            filename: filename || downloadMeta.filename || undefined,
+            savePath: downloadMeta.savePath || undefined,
+            target: target || undefined,
+            source: 'anchor-click'
+          })
+        }
+      } catch (_) {
+      }
+      return nativeAnchorClick.apply(this, args)
+    }
+  } catch (_) {
+  }
+}
 const createElectronApiProxy = (segments = []) => new Proxy(function pinokioElectronApiBridge() {}, {
   get(_target, prop) {
     if (prop === 'then') return undefined
@@ -87,16 +181,8 @@ const createElectronApiProxy = (segments = []) => new Proxy(function pinokioElec
     if (!segments.length) {
       return Promise.resolve({ ok: false, handled: false })
     }
-    const target = (window.parent && window.parent !== window)
-      ? window.parent
-      : (window.top || window)
     const eventName = `electron:api:${segments.join(':')}`
-    target.postMessage({
-      e: 'pinokio:event',
-      event: eventName,
-      payload: { args },
-      context: { frameUrl: window.location.href }
-    }, '*')
+    emitPinokioEvent(eventName, { args }, { frameUrl: window.location.href })
     return Promise.resolve({ ok: true, handled: true, event: eventName })
   }
 })
@@ -108,23 +194,20 @@ window.electronAPI = new Proxy(window.electronAPI, {
     return createElectronApiProxy([toKebab(prop)])
   }
 })
+installDomDownloadBridge()
 ipcRenderer.on('pinokio:event', (_event, envelope = {}) => {
   if (!envelope || typeof envelope.event !== 'string') {
     return
   }
-  const target = (window.parent && window.parent !== window)
-    ? window.parent
-    : (window.top || window)
   const context = (envelope.context && typeof envelope.context === 'object') ? envelope.context : {}
   if (!context.frameUrl) {
     context.frameUrl = window.location.href
   }
-  target.postMessage({
-    e: 'pinokio:event',
-    event: envelope.event,
-    payload: (envelope.payload && typeof envelope.payload === 'object') ? envelope.payload : {},
+  emitPinokioEvent(
+    envelope.event,
+    (envelope.payload && typeof envelope.payload === 'object') ? envelope.payload : {},
     context
-  }, '*')
+  )
 })
 
 ;(function initUpdateBanner() {
