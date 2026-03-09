@@ -18,52 +18,65 @@ const sendPinokio = (action) => {
   }
 }
 
-
-// ONLY WHEN IN CHILD FRAME
+// Only apply frame bridge hooks inside embedded pages.
+let isEmbeddedFrame = false
 let isDirectChildFrame = false
 try {
-  isDirectChildFrame = window.parent !== window && window.parent === window.top
+  isEmbeddedFrame = window.parent !== window
+  isDirectChildFrame = isEmbeddedFrame && window.parent === window.top
 } catch (_) {
+  isEmbeddedFrame = false
   isDirectChildFrame = false
 }
-if (isDirectChildFrame) {
-  let previousUrl = document.location.href
-  const publishLocation = () => {
-    const currentUrl = document.location.href
-    if (currentUrl === previousUrl) {
-      return
-    }
-    previousUrl = currentUrl
+let previousFrameUrl = isEmbeddedFrame ? document.location.href : ''
+const publishFrameLocation = () => {
+  if (!isEmbeddedFrame) {
+    return
+  }
+  const currentUrl = document.location.href
+  if (currentUrl === previousFrameUrl) {
+    return
+  }
+  previousFrameUrl = currentUrl
+  if (isDirectChildFrame) {
     sendPinokio({
-      type: "location",
+      type: 'location',
       url: currentUrl
     })
   }
-  sendPinokio({
-    type: "location",
-    url: previousUrl
-  })
+  syncPinokioInjectors('location').catch(() => {})
+}
+if (isEmbeddedFrame) {
+  if (isDirectChildFrame) {
+    sendPinokio({
+      type: 'location',
+      url: previousFrameUrl
+    })
+  }
   const originalPushState = history.pushState
   history.pushState = function pushStateWithPinokioLocation(...args) {
     const result = originalPushState.apply(this, args)
-    publishLocation()
+    publishFrameLocation()
     return result
   }
   const originalReplaceState = history.replaceState
   history.replaceState = function replaceStateWithPinokioLocation(...args) {
     const result = originalReplaceState.apply(this, args)
-    publishLocation()
+    publishFrameLocation()
     return result
   }
-  window.addEventListener("popstate", publishLocation)
-  window.addEventListener("hashchange", publishLocation)
-  window.addEventListener("message", (event) => {
+  window.addEventListener('popstate', publishFrameLocation)
+  window.addEventListener('hashchange', publishFrameLocation)
+  window.addEventListener('beforeunload', () => {
+    resetPinokioInjectors('unload').catch(() => {})
+  }, { once: true })
+  window.addEventListener('message', (event) => {
     if (event.data) {
-      if (event.data.action === "back") {
+      if (event.data.action === 'back') {
         history.back()
-      } else if (event.data.action === "forward") {
+      } else if (event.data.action === 'forward') {
         history.forward()
-      } else if (event.data.action === "refresh") {
+      } else if (event.data.action === 'refresh') {
         location.reload()
       }
     }
@@ -92,12 +105,22 @@ window.electronAPI = {
     return ipcRenderer.invoke('pinokio:capture-screenshot-debug', { screenshotRequest })
   }
 }
-const resolvePinokioTargetWindow = () => (
-  (window.parent && window.parent !== window)
-    ? window.parent
-    : (window.top || window)
-)
-const emitPinokioEvent = (eventName, payload = {}, context = {}) => {
+const resolvePinokioTargetWindow = () => {
+  try {
+    if (window.parent && window.parent !== window) {
+      return window.parent
+    }
+  } catch (_) {
+  }
+  try {
+    if (window.top && window.top !== window) {
+      return window.top
+    }
+  } catch (_) {
+  }
+  return window
+}
+const postPinokioEvent = (eventName, payload = {}, context = {}) => {
   const target = resolvePinokioTargetWindow()
   const nextContext = (context && typeof context === 'object') ? { ...context } : {}
   if (!nextContext.frameUrl) {
@@ -116,34 +139,26 @@ const emitPinokioEvent = (eventName, payload = {}, context = {}) => {
     context: nextContext
   }, '*')
 }
-window.$pinokio = Object.freeze({
-  emit: (eventName, payload = {}, context = {}) => {
+const ensurePinokioApi = () => {
+  const api = (window.$pinokio && typeof window.$pinokio === 'object')
+    ? window.$pinokio
+    : {}
+  api.trigger = (eventName, payload = {}, context = {}) => {
     if (typeof eventName !== 'string' || !eventName.trim()) {
       return { ok: false, handled: false, reason: 'invalid_event_name' }
     }
     const normalizedEvent = eventName.trim()
-    emitPinokioEvent(
+    postPinokioEvent(
       normalizedEvent,
       (payload && typeof payload === 'object') ? payload : {},
       (context && typeof context === 'object') ? context : {}
     )
     return { ok: true, handled: true, event: normalizedEvent }
   }
-})
-const pinokioInjectedScripts = new Set()
-const resolvePinokioHostOrigin = () => {
-  try {
-    if (typeof document !== 'undefined' && document.referrer) {
-      return new URL(document.referrer).origin
-    }
-  } catch (_) {
-  }
-  try {
-    return new URL(window.location.href).origin
-  } catch (_) {
-  }
-  return ''
+  window.$pinokio = api
+  return api
 }
+ensurePinokioApi()
 const extractWorkspaceFromPathname = (pathname) => {
   if (typeof pathname !== 'string') {
     return ''
@@ -212,98 +227,137 @@ const resolvePinokioWorkspaceHint = () => {
   }
   return ''
 }
-const resolvePinokioInjectScriptUrl = (value) => {
-  if (typeof value !== 'string') {
-    return ''
-  }
-  const trimmed = value.trim()
-  if (!trimmed) {
-    return ''
-  }
-  const baseOrigin = resolvePinokioHostOrigin() || window.location.origin
-  try {
-    return new URL(trimmed, `${baseOrigin}/`).toString()
-  } catch (_) {
-    return ''
+let pinokioInjectSyncId = 0
+
+const buildPinokioContext = (reason = 'load', responseContext = {}) => {
+  const currentUrl = window.location.href
+  const referrerUrl = (typeof document !== 'undefined' && document.referrer) ? document.referrer : ''
+  const workspaceHint = resolvePinokioWorkspaceHint()
+  const rootFrameUrl = responseContext && typeof responseContext.frameUrl === 'string' && responseContext.frameUrl.trim()
+    ? responseContext.frameUrl.trim()
+    : currentUrl
+  return {
+    frameUrl: currentUrl,
+    rootFrameUrl,
+    currentUrl,
+    pageUrl: referrerUrl || rootFrameUrl,
+    referrerUrl,
+    workspace: workspaceHint || undefined,
+    reason
   }
 }
-const loadPinokioInjectScript = async (sourceUrlRaw) => {
-  const sourceUrl = resolvePinokioInjectScriptUrl(sourceUrlRaw)
-  if (!sourceUrl || pinokioInjectedScripts.has(sourceUrl)) {
-    return false
+
+const waitForPinokioDocumentEnd = () => {
+  if (document.readyState === 'loading') {
+    return new Promise((resolve) => {
+      window.addEventListener('DOMContentLoaded', resolve, { once: true })
+    })
   }
-  pinokioInjectedScripts.add(sourceUrl)
-  try {
-    const response = await fetch(sourceUrl)
-    if (!response || !response.ok) {
-      const status = response ? response.status : 'unknown'
-      throw new Error(`fetch_failed:${status}`)
+  return Promise.resolve()
+}
+
+const waitForPinokioDocumentIdle = async () => {
+  await waitForPinokioDocumentEnd()
+  await new Promise((resolve) => {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(() => resolve(), { timeout: 120 })
+      return
     }
-    const source = await response.text()
-    ;(0, eval)(`${source}\n//# sourceURL=${sourceUrl}`)
-    return true
+    setTimeout(resolve, 32)
+  })
+}
+
+const requestPinokioInjectDescriptors = (reason = 'load') => {
+  if (!isEmbeddedFrame) {
+    return Promise.resolve(null)
+  }
+  const context = buildPinokioContext(reason)
+  return ipcRenderer.invoke('pinokio:resolve-injectors', {
+    reason,
+    context
+  }).then((result) => {
+    return result && typeof result === 'object' ? result : null
+  }).catch(() => null)
+}
+
+const resetPinokioInjectors = async (reason = 'sync', syncId = pinokioInjectSyncId) => {
+  if (!isEmbeddedFrame) {
+    return
+  }
+  try {
+    await ipcRenderer.invoke('pinokio:reset-injectors', {
+      syncId,
+      reason,
+      context: buildPinokioContext(reason)
+    })
   } catch (error) {
     try {
-      console.warn('[pinokio][preload] inject script load failed', {
-        sourceUrlRaw,
-        sourceUrl,
+      console.warn('[pinokio][preload] injector reset failed', {
+        reason,
         error: error && error.message ? error.message : String(error)
       })
     } catch (_) {
     }
-    pinokioInjectedScripts.delete(sourceUrl)
-    return false
   }
 }
-const requestPinokioInjectScripts = () => {
-  const referrerUrl = (typeof document !== 'undefined' && document.referrer) ? document.referrer : ''
-  const workspaceHint = resolvePinokioWorkspaceHint()
-  const context = {
-    frameUrl: window.location.href,
-    pageUrl: referrerUrl,
-    currentUrl: referrerUrl,
-    referrerUrl,
-    workspace: workspaceHint || undefined
-  }
-  if (!window.parent || window.parent === window) {
+
+const mountPinokioInjectGroup = async (syncId, descriptors, responseContext, reason) => {
+  if (!descriptors.length || syncId !== pinokioInjectSyncId) {
     return
   }
-  const targetWindow = resolvePinokioTargetWindow()
   try {
-    targetWindow.postMessage({
-      e: 'pinokio:inject:request',
-      context
-    }, '*')
-  } catch (_) {
+    await ipcRenderer.invoke('pinokio:mount-injectors', {
+      syncId,
+      reason,
+      inject: descriptors,
+      context: buildPinokioContext(reason, responseContext)
+    })
+  } catch (error) {
+    try {
+      console.warn('[pinokio][preload] injector mount failed', {
+        reason,
+        descriptors: descriptors.map((item) => item && item.src).filter(Boolean),
+        error: error && error.message ? error.message : String(error)
+      })
+    } catch (_) {
+    }
   }
 }
-if (window.parent && window.parent !== window) {
-  window.addEventListener('message', (event) => {
-    if (!event) {
-      return
-    }
-    const validSource = (
-      event.source === window.parent ||
-      (window.top && event.source === window.top)
-    )
-    if (!validSource) {
-      return
-    }
-    const data = event.data
-    if (!data || data.e !== 'pinokio:inject:load') {
-      return
-    }
-    const scripts = Array.isArray(data.scripts) ? data.scripts : []
-    if (!scripts.length) {
-      return
-    }
-    Promise.all(scripts.map((item) => loadPinokioInjectScript(item))).catch(() => {})
-  })
-  if (document.readyState === 'loading') {
-    window.addEventListener('DOMContentLoaded', requestPinokioInjectScripts, { once: true })
-  } else {
-    requestPinokioInjectScripts()
+
+async function syncPinokioInjectors(reason = 'load') {
+  if (!isEmbeddedFrame) {
+    return
   }
+  const syncId = ++pinokioInjectSyncId
+  const response = await requestPinokioInjectDescriptors(reason)
+  if (syncId !== pinokioInjectSyncId) {
+    return
+  }
+  const descriptors = Array.isArray(response && response.inject) ? response.inject : []
+  const groups = {
+    start: [],
+    end: [],
+    idle: []
+  }
+  for (const descriptor of descriptors) {
+    const when = descriptor && (descriptor.when === 'start' || descriptor.when === 'end')
+      ? descriptor.when
+      : 'idle'
+    groups[when].push(descriptor)
+  }
+  await resetPinokioInjectors(reason, syncId)
+  if (syncId !== pinokioInjectSyncId) {
+    return
+  }
+  await mountPinokioInjectGroup(syncId, groups.start, response && response.context, reason)
+  await waitForPinokioDocumentEnd()
+  await mountPinokioInjectGroup(syncId, groups.end, response && response.context, reason)
+  await waitForPinokioDocumentIdle()
+  await mountPinokioInjectGroup(syncId, groups.idle, response && response.context, reason)
+}
+
+if (isEmbeddedFrame) {
+  syncPinokioInjectors('load').catch(() => {})
 }
 
 ;(function initUpdateBanner() {

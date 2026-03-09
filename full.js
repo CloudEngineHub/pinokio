@@ -206,6 +206,10 @@ let browserLogFileReady = false
 let browserLogBuffer = []
 let browserLogWritePromise = Promise.resolve()
 let permissionHandlersInstalled = false
+let injectorHandlersInstalled = false
+const frameInjectorSyncState = new Map()
+const frameInjectTargetRegistry = new Map()
+const PINOKIO_INJECT_ISOLATED_WORLD_ID = 42000
 const permissionPrompted = new Set()
 const permissionPromptInFlight = new Set()
 const safeParseUrl = (value, base) => {
@@ -1720,6 +1724,552 @@ const installInspectorHandlers = () => {
   })
 }
 
+const getFrameInjectorKey = (frame) => {
+  if (!frame) {
+    return ''
+  }
+  if (typeof frame.frameTreeNodeId === 'number') {
+    return `frame:${frame.frameTreeNodeId}`
+  }
+  const processId = typeof frame.processId === 'number' ? frame.processId : 'unknown'
+  const token = typeof frame.frameToken === 'string' && frame.frameToken
+    ? frame.frameToken
+    : String(typeof frame.routingId === 'number' ? frame.routingId : 'unknown')
+  return `${processId}:${token}`
+}
+
+const serializeForJavaScript = (value) => JSON.stringify(value)
+  .replace(/\u2028/g, '\\u2028')
+  .replace(/\u2029/g, '\\u2029')
+
+const normalizePinokioInjectDescriptor = (descriptor) => {
+  if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+    return null
+  }
+  const src = typeof descriptor.src === 'string' ? descriptor.src.trim() : ''
+  if (!src) {
+    return null
+  }
+  const match = Array.isArray(descriptor.match) && descriptor.match.length
+    ? descriptor.match.filter((item) => typeof item === 'string' && item.trim())
+    : ['*']
+  const world = typeof descriptor.world === 'string' && descriptor.world.trim().toLowerCase() === 'isolated'
+    ? 'isolated'
+    : 'main'
+  const whenValue = typeof descriptor.when === 'string' ? descriptor.when.trim().toLowerCase() : ''
+  const when = (whenValue === 'start' || whenValue === 'end') ? whenValue : 'idle'
+  const frameValue = typeof descriptor.frame === 'string' ? descriptor.frame.trim().toLowerCase() : ''
+  const frame = frameValue === 'all' ? 'all' : 'self'
+  return {
+    src,
+    match,
+    world,
+    when,
+    frame
+  }
+}
+
+const normalizePinokioInjectTargetRegistrations = (targets) => {
+  const values = Array.isArray(targets) ? targets : []
+  const normalized = []
+  for (const target of values) {
+    if (!target || typeof target !== 'object' || Array.isArray(target)) {
+      continue
+    }
+    const name = typeof target.name === 'string' ? target.name.trim() : ''
+    const src = normalizeInspectorUrl(typeof target.src === 'string' ? target.src.trim() : '')
+    if (!name && !src) {
+      continue
+    }
+    normalized.push({
+      name,
+      src,
+      inject: Array.isArray(target.inject)
+        ? target.inject.map((entry) => normalizePinokioInjectDescriptor(entry)).filter(Boolean)
+        : []
+    })
+  }
+  return normalized
+}
+
+const findFramePath = (frame, target, trail = []) => {
+  if (!frame || !target) {
+    return null
+  }
+  const nextTrail = trail.concat(frame)
+  if (frame === target) {
+    return nextTrail
+  }
+  const children = Array.isArray(frame.frames) ? frame.frames : []
+  for (const child of children) {
+    const result = findFramePath(child, target, nextTrail)
+    if (result) {
+      return result
+    }
+  }
+  return null
+}
+
+const resolvePinokioRelativeMatchTarget = (href) => {
+  try {
+    const parsed = new URL(href)
+    return `${parsed.pathname}${parsed.search}${parsed.hash}` || '/'
+  } catch (_) {
+    return href || ''
+  }
+}
+
+const escapePinokioPattern = (value) => String(value || '').replace(/[|\\{}()[\]^$+?.]/g, '\\$&')
+const pinokioPatternToExpression = (value) => {
+  const input = String(value || '')
+  let expression = ''
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index]
+    if (char === '*') {
+      while (input[index + 1] === '*') {
+        index += 1
+      }
+      expression += '.*'
+      continue
+    }
+    expression += escapePinokioPattern(char)
+  }
+  return `^${expression}$`
+}
+
+const matchesPinokioInjectPattern = (pattern, currentUrl) => {
+  if (typeof pattern !== 'string') {
+    return false
+  }
+  const normalizedPattern = pattern.trim()
+  if (!normalizedPattern) {
+    return false
+  }
+  const sourceValue = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(normalizedPattern)
+    ? currentUrl
+    : resolvePinokioRelativeMatchTarget(currentUrl)
+  const expression = pinokioPatternToExpression(normalizedPattern)
+  try {
+    return new RegExp(expression).test(sourceValue)
+  } catch (_) {
+    return false
+  }
+}
+
+const matchPinokioInjectTargetToFrame = (targets, frame) => {
+  if (!frame || !Array.isArray(targets) || !targets.length) {
+    return null
+  }
+  const frameName = typeof frame.name === 'string' ? frame.name.trim() : ''
+  const frameUrl = normalizeInspectorUrl(frame.url || '')
+
+  let matched = null
+  if (frameName) {
+    matched = targets.find((entry) => entry.name && entry.name === frameName && (!entry.src || urlsRoughlyMatch(entry.src, frameUrl)))
+      || targets.find((entry) => entry.name && entry.name === frameName)
+  }
+  if (!matched && frameUrl) {
+    matched = targets.find((entry) => entry.src && urlsRoughlyMatch(entry.src, frameUrl)) || null
+  }
+  return matched
+}
+
+const resolvePinokioInjectorsForFrame = (frame, payload = {}) => {
+  if (!frame) {
+    return {
+      inject: [],
+      context: null
+    }
+  }
+  const topFrame = frame.top || frame
+  const path = findFramePath(topFrame, frame)
+  if (!Array.isArray(path) || path.length === 0) {
+    return {
+      inject: [],
+      context: null
+    }
+  }
+  const requestedContext = payload && payload.context && typeof payload.context === 'object'
+    ? payload.context
+    : {}
+  const currentUrl = typeof requestedContext.currentUrl === 'string' && requestedContext.currentUrl.trim()
+    ? requestedContext.currentUrl.trim()
+    : (normalizeInspectorUrl(frame.url || '') || '')
+
+  for (let ownerIndex = path.length - 2; ownerIndex >= 0; ownerIndex -= 1) {
+    const ownerFrame = path[ownerIndex]
+    const ownerKey = getFrameInjectorKey(ownerFrame)
+    const registry = frameInjectTargetRegistry.get(ownerKey)
+    if (!registry || !Array.isArray(registry.targets) || registry.targets.length === 0) {
+      continue
+    }
+    const directChildFrame = path[ownerIndex + 1]
+    const target = matchPinokioInjectTargetToFrame(registry.targets, directChildFrame)
+    if (!target) {
+      continue
+    }
+    const descendantDepth = Math.max(0, path.length - ownerIndex - 2)
+    const inject = target.inject.filter((descriptor) => {
+      if (descriptor && descriptor.frame !== 'all' && descendantDepth !== 0) {
+        return false
+      }
+      const matches = Array.isArray(descriptor.match) && descriptor.match.length
+        ? descriptor.match
+        : ['*']
+      return matches.some((pattern) => matchesPinokioInjectPattern(pattern, currentUrl))
+    })
+    return {
+      inject,
+      context: {
+        frameUrl: normalizeInspectorUrl(ownerFrame.url || '') || '',
+        rootFrameUrl: normalizeInspectorUrl(directChildFrame.url || '') || '',
+        currentUrl,
+        pageUrl: normalizeInspectorUrl(frame.url || '') || currentUrl
+      }
+    }
+  }
+
+  return {
+    inject: [],
+    context: null
+  }
+}
+
+const PINOKIO_ABSOLUTE_URL_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/
+
+const resolvePinokioInjectSourceUrl = (value) => {
+  if (typeof value !== 'string') {
+    return ''
+  }
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return ''
+  }
+  if (!PINOKIO_ABSOLUTE_URL_PATTERN.test(trimmed) && !trimmed.startsWith('/')) {
+    return ''
+  }
+  const baseUrl = root_url || 'http://localhost'
+  const parsed = safeParseUrl(trimmed, baseUrl)
+  if (!parsed) {
+    return ''
+  }
+  if (!['http:', 'https:', 'file:'].includes(parsed.protocol)) {
+    return ''
+  }
+  return parsed.href
+}
+
+const buildPinokioInjectRuntimeBootstrap = () => {
+  const source = function() {
+    const resolveTargetWindow = () => {
+      try {
+        if (window.parent && window.parent !== window) {
+          return window.parent
+        }
+      } catch (_) {
+      }
+      try {
+        if (window.top && window.top !== window) {
+          return window.top
+        }
+      } catch (_) {
+      }
+      return window
+    }
+
+    const ensureApi = () => {
+      if (!window.$pinokio || typeof window.$pinokio !== 'object') {
+        window.$pinokio = {}
+      }
+      if (typeof window.$pinokio.trigger !== 'function') {
+        window.$pinokio.trigger = function(eventName, payload = {}, context = {}) {
+          if (typeof eventName !== 'string' || !eventName.trim()) {
+            return { ok: false, handled: false, reason: 'invalid_event_name' }
+          }
+          const nextContext = (context && typeof context === 'object') ? { ...context } : {}
+          if (!nextContext.frameUrl) {
+            nextContext.frameUrl = window.location.href
+          }
+          resolveTargetWindow().postMessage({
+            e: 'pinokio:event',
+            event: eventName.trim(),
+            payload: (payload && typeof payload === 'object') ? payload : {},
+            context: nextContext
+          }, '*')
+          return { ok: true, handled: true, event: eventName.trim() }
+        }
+      }
+      window.$pinokio.inject = function(definition) {
+        return window.__PINOKIO_INJECT_RUNTIME__.register(definition)
+      }
+      return window.$pinokio
+    }
+
+    const buildMountContext = (descriptor, sourceContext) => {
+      const currentUrl = (window && window.location && window.location.href) ? window.location.href : ''
+      const baseContext = (sourceContext && typeof sourceContext === 'object') ? { ...sourceContext } : {}
+      if (!baseContext.frameUrl) {
+        baseContext.frameUrl = currentUrl
+      }
+      if (!baseContext.currentUrl) {
+        baseContext.currentUrl = currentUrl
+      }
+      if (!baseContext.rootFrameUrl) {
+        baseContext.rootFrameUrl = currentUrl
+      }
+      return {
+        ...baseContext,
+        descriptor,
+        trigger(eventName, payload = {}, context = {}) {
+          const nextContext = (context && typeof context === 'object')
+            ? { ...baseContext, ...context }
+            : { ...baseContext }
+          return window.$pinokio.trigger(eventName, payload, nextContext)
+        }
+      }
+    }
+
+    if (!window.__PINOKIO_INJECT_RUNTIME__) {
+      const state = {
+        current: null,
+        cleanups: new Map()
+      }
+      window.__PINOKIO_INJECT_RUNTIME__ = {
+        register(definition) {
+          const current = state.current
+          if (!current) {
+            throw new Error('window.$pinokio.inject() must be called while an injector is loading.')
+          }
+          if (!definition || typeof definition !== 'object' || typeof definition.mount !== 'function') {
+            throw new Error('Pinokio injectors must provide a mount(ctx) function.')
+          }
+          if (current.registered) {
+            throw new Error('Injector registered more than once during a single mount.')
+          }
+          const cleanup = definition.mount(buildMountContext(current.descriptor, current.context))
+          current.registered = true
+          if (typeof cleanup === 'function') {
+            state.cleanups.set(current.descriptor.runtimeId, cleanup)
+          } else {
+            state.cleanups.delete(current.descriptor.runtimeId)
+          }
+          return { ok: true, id: current.descriptor.runtimeId || '' }
+        },
+        run(descriptor, context, runSource) {
+          ensureApi()
+          state.current = {
+            descriptor: descriptor || {},
+            context: (context && typeof context === 'object') ? context : {},
+            registered: false
+          }
+          try {
+            if (typeof runSource === 'function') {
+              runSource()
+            }
+            if (!state.current.registered) {
+              throw new Error('Injector did not call window.$pinokio.inject(...).')
+            }
+          } finally {
+            state.current = null
+          }
+        },
+        unmountAll() {
+          for (const cleanup of state.cleanups.values()) {
+            if (typeof cleanup !== 'function') {
+              continue
+            }
+            try {
+              cleanup()
+            } catch (error) {
+              try {
+                console.warn('[pinokio][inject] cleanup failed', error && error.message ? error.message : String(error))
+              } catch (_) {
+              }
+            }
+          }
+          state.cleanups.clear()
+        }
+      }
+    }
+
+    ensureApi()
+  }
+  return `(${source.toString()})();`
+}
+
+const buildPinokioInjectUnmountScript = () => `(() => {
+  const runtime = window.__PINOKIO_INJECT_RUNTIME__
+  if (runtime && typeof runtime.unmountAll === 'function') {
+    runtime.unmountAll()
+  }
+})();`
+
+const buildPinokioInjectExecution = ({ descriptor, context, source }) => {
+  const bootstrap = buildPinokioInjectRuntimeBootstrap()
+  return `(() => {
+${bootstrap}
+window.__PINOKIO_INJECT_RUNTIME__.run(${serializeForJavaScript(descriptor)}, ${serializeForJavaScript(context || {})}, () => {
+${source}
+})
+})();
+//# sourceURL=${descriptor.src}`
+}
+
+const resetPinokioInjectorsInFrame = async (frame) => {
+  if (!frame || (typeof frame.isDestroyed === 'function' && frame.isDestroyed())) {
+    return
+  }
+  const code = buildPinokioInjectUnmountScript()
+  const tasks = []
+  if (typeof frame.executeJavaScript === 'function') {
+    tasks.push(frame.executeJavaScript(code, false))
+  }
+  if (typeof frame.executeJavaScriptInIsolatedWorld === 'function') {
+    tasks.push(frame.executeJavaScriptInIsolatedWorld(
+      PINOKIO_INJECT_ISOLATED_WORLD_ID,
+      [{ code }],
+      false
+    ))
+  }
+  await Promise.allSettled(tasks)
+}
+
+const executePinokioInjectDescriptor = async (frame, descriptor, context) => {
+  if (!frame || (typeof frame.isDestroyed === 'function' && frame.isDestroyed())) {
+    throw new Error('Target frame is not available.')
+  }
+  const sourceDescriptor = descriptor
+  const sourceUrl = resolvePinokioInjectSourceUrl(descriptor.src)
+  if (!sourceUrl) {
+    throw new Error(`Invalid injector source URL: ${descriptor.src}`)
+  }
+  const response = await fetch(sourceUrl, { cache: 'no-store' })
+  if (!response || !response.ok) {
+    const status = response ? response.status : 'unknown'
+    throw new Error(`Unable to load injector source: ${status}`)
+  }
+  const source = await response.text()
+  const resolvedDescriptor = {
+    ...sourceDescriptor,
+    src: sourceUrl
+  }
+  const code = buildPinokioInjectExecution({ descriptor: resolvedDescriptor, context, source })
+  if (descriptor.world === 'isolated') {
+    if (typeof frame.executeJavaScriptInIsolatedWorld !== 'function') {
+      throw new Error('Isolated-world frame injection is not supported by this Electron frame API.')
+    }
+    return frame.executeJavaScriptInIsolatedWorld(
+      PINOKIO_INJECT_ISOLATED_WORLD_ID,
+      [{ code, url: sourceUrl }],
+      false
+    )
+  }
+  return frame.executeJavaScript(code, false)
+}
+
+const installInjectorHandlers = () => {
+  if (injectorHandlersInstalled) {
+    return
+  }
+  injectorHandlersInstalled = true
+
+  ipcMain.on('pinokio:update-inject-targets', (event, payload = {}) => {
+    const ownerFrame = event.senderFrame
+    if (!ownerFrame || (typeof ownerFrame.isDestroyed === 'function' && ownerFrame.isDestroyed())) {
+      return
+    }
+    const ownerKey = getFrameInjectorKey(ownerFrame)
+    const targets = normalizePinokioInjectTargetRegistrations(payload && payload.targets)
+    frameInjectTargetRegistry.set(ownerKey, {
+      targets
+    })
+  })
+
+  ipcMain.handle('pinokio:resolve-injectors', async (event, payload = {}) => {
+    const frame = event.senderFrame
+    if (!frame || (typeof frame.isDestroyed === 'function' && frame.isDestroyed())) {
+      return { ok: false, reason: 'missing_frame', inject: [], context: null }
+    }
+    const resolved = resolvePinokioInjectorsForFrame(frame, payload)
+    return {
+      ok: true,
+      inject: resolved.inject,
+      context: resolved.context
+    }
+  })
+
+  ipcMain.handle('pinokio:reset-injectors', async (event, payload = {}) => {
+    const frame = event.senderFrame
+    if (!frame || (typeof frame.isDestroyed === 'function' && frame.isDestroyed())) {
+      return { ok: false, reason: 'missing_frame' }
+    }
+    const frameKey = getFrameInjectorKey(frame)
+    const syncId = typeof payload.syncId === 'number' ? payload.syncId : 0
+    frameInjectorSyncState.set(frameKey, syncId)
+    await resetPinokioInjectorsInFrame(frame)
+    return { ok: true, syncId }
+  })
+
+  ipcMain.handle('pinokio:mount-injectors', async (event, payload = {}) => {
+    const frame = event.senderFrame
+    if (!frame || (typeof frame.isDestroyed === 'function' && frame.isDestroyed())) {
+      return { ok: false, reason: 'missing_frame', applied: [], failed: [] }
+    }
+    const frameKey = getFrameInjectorKey(frame)
+    const syncId = typeof payload.syncId === 'number' ? payload.syncId : 0
+    if (syncId && frameInjectorSyncState.get(frameKey) !== syncId) {
+      return { ok: true, skipped: true, reason: 'stale_sync', applied: [], failed: [], syncId }
+    }
+    const baseContext = payload && payload.context && typeof payload.context === 'object'
+      ? { ...payload.context }
+      : {}
+    const injectList = Array.isArray(payload.inject) ? payload.inject : []
+    const applied = []
+    const failed = []
+
+    for (let index = 0; index < injectList.length; index += 1) {
+      if (syncId && frameInjectorSyncState.get(frameKey) !== syncId) {
+        return { ok: true, skipped: true, reason: 'stale_sync', applied, failed, syncId }
+      }
+      const normalizedDescriptor = normalizePinokioInjectDescriptor(injectList[index])
+      if (!normalizedDescriptor) {
+        continue
+      }
+      const descriptor = {
+        ...normalizedDescriptor,
+        runtimeId: `${frameKey}:${syncId}:${index}:${normalizedDescriptor.src}`
+      }
+      try {
+        await executePinokioInjectDescriptor(frame, descriptor, baseContext)
+        applied.push({
+          src: descriptor.src,
+          world: descriptor.world,
+          runtimeId: descriptor.runtimeId
+        })
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error)
+        failed.push({
+          src: descriptor.src,
+          world: descriptor.world,
+          error: message
+        })
+        console.warn('[pinokio][main] injector mount failed', {
+          src: descriptor.src,
+          world: descriptor.world,
+          error: message
+        })
+      }
+    }
+
+    return {
+      ok: failed.length === 0,
+      applied,
+      failed,
+      syncId
+    }
+  })
+}
+
 const normalizePermissionList = (value) => {
   if (!value) return []
   const list = Array.isArray(value) ? value : [value]
@@ -2785,6 +3335,7 @@ if (!gotTheLock) {
     app.userAgentFallback = "Pinokio"
 
     installInspectorHandlers()
+    installInjectorHandlers()
     installPermissionHandlers()
 
     ipcMain.on('pinokio:update-banner-action', (_event, payload = {}) => {
