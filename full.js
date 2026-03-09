@@ -1738,6 +1738,16 @@ const getFrameInjectorKey = (frame) => {
   return `${processId}:${token}`
 }
 
+const getPinokioInjectWebContentsKey = (sender, frame = null) => {
+  if (sender && typeof sender.id === 'number') {
+    return `wc:${sender.id}`
+  }
+  if (frame && frame.hostWebContents && typeof frame.hostWebContents.id === 'number') {
+    return `wc:${frame.hostWebContents.id}`
+  }
+  return ''
+}
+
 const serializeForJavaScript = (value) => JSON.stringify(value)
   .replace(/\u2028/g, '\\u2028')
   .replace(/\u2029/g, '\\u2029')
@@ -1856,12 +1866,14 @@ const matchesPinokioInjectPattern = (pattern, currentUrl) => {
   }
 }
 
-const matchPinokioInjectTargetToFrame = (targets, frame) => {
-  if (!frame || !Array.isArray(targets) || !targets.length) {
+const matchPinokioInjectTargetToFrame = (targets, frame, hints = {}) => {
+  if (!Array.isArray(targets) || !targets.length) {
     return null
   }
-  const frameName = typeof frame.name === 'string' ? frame.name.trim() : ''
-  const frameUrl = normalizeInspectorUrl(frame.url || '')
+  const frameName = (frame && typeof frame.name === 'string' ? frame.name.trim() : '')
+    || (typeof hints.frameName === 'string' ? hints.frameName.trim() : '')
+  const frameUrl = normalizeInspectorUrl((frame && frame.url) || '')
+    || normalizeInspectorUrl(typeof hints.frameUrl === 'string' ? hints.frameUrl.trim() : '')
 
   let matched = null
   if (frameName) {
@@ -1874,16 +1886,31 @@ const matchPinokioInjectTargetToFrame = (targets, frame) => {
   return matched
 }
 
-const resolvePinokioInjectorsForFrame = (frame, payload = {}) => {
-  if (!frame) {
-    return {
-      inject: [],
-      context: null
-    }
+const resolvePinokioInjectTargetMatch = ({ registry, frame, currentUrl, targetHints, descendantDepth = 0 }) => {
+  if (!registry || !Array.isArray(registry.targets) || registry.targets.length === 0) {
+    return null
   }
-  const topFrame = frame.top || frame
-  const path = findFramePath(topFrame, frame)
-  if (!Array.isArray(path) || path.length === 0) {
+  const target = matchPinokioInjectTargetToFrame(registry.targets, frame, targetHints)
+  if (!target) {
+    return null
+  }
+  const inject = target.inject.filter((descriptor) => {
+    if (descriptor && descriptor.frame !== 'all' && descendantDepth !== 0) {
+      return false
+    }
+    const matches = Array.isArray(descriptor.match) && descriptor.match.length
+      ? descriptor.match
+      : ['*']
+    return matches.some((pattern) => matchesPinokioInjectPattern(pattern, currentUrl))
+  })
+  return {
+    target,
+    inject
+  }
+}
+
+const resolvePinokioInjectorsForFrame = (frame, payload = {}, sender = null) => {
+  if (!frame) {
     return {
       inject: [],
       context: null
@@ -1895,36 +1922,72 @@ const resolvePinokioInjectorsForFrame = (frame, payload = {}) => {
   const currentUrl = typeof requestedContext.currentUrl === 'string' && requestedContext.currentUrl.trim()
     ? requestedContext.currentUrl.trim()
     : (normalizeInspectorUrl(frame.url || '') || '')
+  let ownerFrame = frame.parent || null
+  let directChildFrame = frame
+  let descendantDepth = 0
+  const targetHints = {
+    frameName: typeof requestedContext.frameName === 'string' ? requestedContext.frameName.trim() : '',
+    frameUrl: currentUrl
+  }
 
-  for (let ownerIndex = path.length - 2; ownerIndex >= 0; ownerIndex -= 1) {
-    const ownerFrame = path[ownerIndex]
+  while (ownerFrame) {
     const ownerKey = getFrameInjectorKey(ownerFrame)
     const registry = frameInjectTargetRegistry.get(ownerKey)
     if (!registry || !Array.isArray(registry.targets) || registry.targets.length === 0) {
+      directChildFrame = ownerFrame
+      ownerFrame = ownerFrame.parent || null
+      descendantDepth += 1
       continue
     }
-    const directChildFrame = path[ownerIndex + 1]
-    const target = matchPinokioInjectTargetToFrame(registry.targets, directChildFrame)
-    if (!target) {
-      continue
-    }
-    const descendantDepth = Math.max(0, path.length - ownerIndex - 2)
-    const inject = target.inject.filter((descriptor) => {
-      if (descriptor && descriptor.frame !== 'all' && descendantDepth !== 0) {
-        return false
-      }
-      const matches = Array.isArray(descriptor.match) && descriptor.match.length
-        ? descriptor.match
-        : ['*']
-      return matches.some((pattern) => matchesPinokioInjectPattern(pattern, currentUrl))
+    const match = resolvePinokioInjectTargetMatch({
+      registry,
+      frame: directChildFrame,
+      currentUrl,
+      targetHints,
+      descendantDepth
     })
+    if (!match) {
+      directChildFrame = ownerFrame
+      ownerFrame = ownerFrame.parent || null
+      descendantDepth += 1
+      continue
+    }
     return {
-      inject,
+      inject: match.inject,
       context: {
         frameUrl: normalizeInspectorUrl(ownerFrame.url || '') || '',
         rootFrameUrl: normalizeInspectorUrl(directChildFrame.url || '') || '',
         currentUrl,
         pageUrl: normalizeInspectorUrl(frame.url || '') || currentUrl
+      }
+    }
+  }
+
+  const webContentsKey = getPinokioInjectWebContentsKey(sender, frame)
+  if (webContentsKey) {
+    const registries = Array.from(frameInjectTargetRegistry.entries())
+      .map(([ownerKey, registry]) => ({ ownerKey, registry }))
+      .filter(({ registry }) => registry && registry.webContentsKey === webContentsKey && Array.isArray(registry.targets) && registry.targets.length > 0)
+      .sort((left, right) => (right.registry.updatedAt || 0) - (left.registry.updatedAt || 0))
+    for (const entry of registries) {
+      const match = resolvePinokioInjectTargetMatch({
+        registry: entry.registry,
+        frame,
+        currentUrl,
+        targetHints,
+        descendantDepth: 0
+      })
+      if (!match) {
+        continue
+      }
+      return {
+        inject: match.inject,
+        context: {
+          frameUrl: entry.registry.pageUrl || '',
+          rootFrameUrl: normalizeInspectorUrl(frame.url || '') || currentUrl,
+          currentUrl,
+          pageUrl: entry.registry.pageUrl || currentUrl
+        }
       }
     }
   }
@@ -2173,16 +2236,28 @@ const installInjectorHandlers = () => {
   }
   injectorHandlersInstalled = true
 
-  ipcMain.on('pinokio:update-inject-targets', (event, payload = {}) => {
-    const ownerFrame = event.senderFrame
+  const updatePinokioInjectTargets = (ownerFrame, sender, payload = {}) => {
     if (!ownerFrame || (typeof ownerFrame.isDestroyed === 'function' && ownerFrame.isDestroyed())) {
-      return
+      return { ok: false, reason: 'missing_frame', targets: [] }
     }
     const ownerKey = getFrameInjectorKey(ownerFrame)
+    const webContentsKey = getPinokioInjectWebContentsKey(sender, ownerFrame)
     const targets = normalizePinokioInjectTargetRegistrations(payload && payload.targets)
     frameInjectTargetRegistry.set(ownerKey, {
-      targets
+      targets,
+      pageUrl: payload && payload.pageUrl ? payload.pageUrl : '',
+      webContentsKey,
+      updatedAt: Date.now()
     })
+    return { ok: true, targets }
+  }
+
+  ipcMain.on('pinokio:update-inject-targets', (event, payload = {}) => {
+    updatePinokioInjectTargets(event.senderFrame, event.sender, payload)
+  })
+
+  ipcMain.on('pinokio:update-inject-targets-sync', (event, payload = {}) => {
+    event.returnValue = updatePinokioInjectTargets(event.senderFrame, event.sender, payload)
   })
 
   ipcMain.handle('pinokio:resolve-injectors', async (event, payload = {}) => {
@@ -2190,7 +2265,7 @@ const installInjectorHandlers = () => {
     if (!frame || (typeof frame.isDestroyed === 'function' && frame.isDestroyed())) {
       return { ok: false, reason: 'missing_frame', inject: [], context: null }
     }
-    const resolved = resolvePinokioInjectorsForFrame(frame, payload)
+    const resolved = resolvePinokioInjectorsForFrame(frame, payload, event.sender)
     return {
       ok: true,
       inject: resolved.inject,

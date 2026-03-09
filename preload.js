@@ -98,6 +98,7 @@ window.electronAPI = {
   send: (type, msg) => {
     ipcRenderer.send(type, msg)
   },
+  sendSync: (type, msg) => ipcRenderer.sendSync(type, msg),
   requestPermissions: (payload) => ipcRenderer.invoke('pinokio:request-permissions', payload || {}),
   startInspector: (payload) => ipcRenderer.invoke('pinokio:start-inspector', payload || {}),
   stopInspector: () => ipcRenderer.invoke('pinokio:stop-inspector'),
@@ -233,6 +234,7 @@ const buildPinokioContext = (reason = 'load', responseContext = {}) => {
   const currentUrl = window.location.href
   const referrerUrl = (typeof document !== 'undefined' && document.referrer) ? document.referrer : ''
   const workspaceHint = resolvePinokioWorkspaceHint()
+  const frameName = typeof window.name === 'string' ? window.name.trim() : ''
   const rootFrameUrl = responseContext && typeof responseContext.frameUrl === 'string' && responseContext.frameUrl.trim()
     ? responseContext.frameUrl.trim()
     : currentUrl
@@ -242,6 +244,7 @@ const buildPinokioContext = (reason = 'load', responseContext = {}) => {
     currentUrl,
     pageUrl: referrerUrl || rootFrameUrl,
     referrerUrl,
+    frameName: frameName || undefined,
     workspace: workspaceHint || undefined,
     reason
   }
@@ -275,9 +278,7 @@ const requestPinokioInjectDescriptors = (reason = 'load') => {
   return ipcRenderer.invoke('pinokio:resolve-injectors', {
     reason,
     context
-  }).then((result) => {
-    return result && typeof result === 'object' ? result : null
-  }).catch(() => null)
+  }).then((result) => result && typeof result === 'object' ? result : null).catch(() => null)
 }
 
 const resetPinokioInjectors = async (reason = 'sync', syncId = pinokioInjectSyncId) => {
