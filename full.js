@@ -5,6 +5,7 @@ const path = require("path")
 const Pinokiod = require("pinokiod")
 const os = require('os')
 const Updater = require('./updater')
+const createPopupShellManager = require('./popup-shell')
 const is_mac = process.platform.startsWith("darwin")
 const platform = os.platform()
 var mainWindow;
@@ -238,6 +239,9 @@ const installForceDestroyOnClose = (win) => {
     win.destroy()
   })
 }
+const popupShellManager = createPopupShellManager({
+  installForceDestroyOnClose
+})
 const resolveConsoleSourceUrl = (sourceId, pageUrl) => {
   const page = safeParseUrl(pageUrl)
   const source = safeParseUrl(sourceId, page ? page.href : undefined)
@@ -2683,7 +2687,11 @@ const buildBrowserContextMenuTemplate = (webContents, params = {}) => {
       click: () => {
         try {
           if (typeof loadNewWindow === 'function' && PORT) {
-            loadNewWindow(linkURL, PORT)
+            if (popupShellManager.isPinokioWindowUrl(linkURL, root_url)) {
+              loadNewWindow(linkURL, PORT)
+            } else {
+              popupShellManager.openExternalWindow({ url: linkURL })
+            }
             return
           }
         } catch (error) {
@@ -3083,8 +3091,6 @@ const attach = (event, webContents) => {
     let win = wc.getOwnerBrowserWindow()
     let [width, height] = win.getSize()
     let [x,y] = win.getPosition()
-
-
     let origin = new URL(url).origin
     console.log("config", { config, root_url, origin })
 
@@ -3095,10 +3101,20 @@ const attach = (event, webContents) => {
     // if features exists and it's app or self, open in pinokio
     // otherwise if it's file, 
 
+    if (/(^|,)\s*pinokio\s*(,|$)/i.test(features)) {
+      const targetUrl = popupShellManager.resolveTargetUrl({
+        url,
+        openerWebContents: wc,
+        rootUrl: root_url
+      })
+      if (targetUrl) loadNewWindow(targetUrl, PORT)
+      return { action: 'deny' };
+    }
+
     if (features === "browser") {
       shell.openExternal(url);
       return { action: 'deny' };
-    } else if (origin === root_url) {
+    } else if (popupShellManager.isPinokioWindowUrl(url, root_url)) {
       return {
         action: 'allow',
         outlivesOpener: true,
@@ -3126,30 +3142,7 @@ const attach = (event, webContents) => {
       console.log({ features, url })
       if (features) {
         if (features.startsWith("app") || features.startsWith("self")) {
-          return {
-            action: 'allow',
-            outlivesOpener: true,
-            overrideBrowserWindowOptions: {
-              width: (params.get("width") ? parseInt(params.get("width")) : width),
-              height: (params.get("height") ? parseInt(params.get("height")) : height),
-              x: x + 30,
-              y: y + 30,
-
-              parent: null,
-              titleBarStyle : "hidden",
-              titleBarOverlay : titleBarOverlay(colors),
-              webPreferences: {
-                session: session.defaultSession,
-                webSecurity: false,
-                spellcheck: false,
-                nativeWindowOpen: true,
-                contextIsolation: false,
-                nodeIntegrationInSubFrames: true,
-                preload: path.join(__dirname, 'preload.js')
-              },
-
-            }
-          }
+          return popupShellManager.createPopupResponse({ params, width, height, x, y })
         } else if (features.startsWith("file")) {
           let u = features.replace("file://", "")
           shell.showItemInFolder(u)
