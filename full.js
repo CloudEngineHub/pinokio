@@ -226,6 +226,48 @@ const safeParseUrl = (value, base) => {
     return null
   }
 }
+const popupNavigationGuards = new Map()
+const isRootShellUrl = (value) => {
+  const root = safeParseUrl(root_url)
+  const target = safeParseUrl(value, root ? root.href : undefined)
+  return Boolean(root && target && target.origin === root.origin && (target.pathname || '/') === '/')
+}
+const getHttpNavigationTarget = (value, base) => {
+  const target = safeParseUrl(value, base)
+  if (!target || (target.protocol !== 'http:' && target.protocol !== 'https:')) {
+    return null
+  }
+  return target
+}
+const openNonPinokioNavigationInPopup = ({ event, owner, url, frame } = {}) => {
+  const target = getHttpNavigationTarget(url, root_url || undefined)
+  if (!target || !owner || owner.isDestroyed?.() || owner.__pinokioPopupShell) {
+    return false
+  }
+  if (popupShellManager.isPinokioWindowUrl(target.href, root_url)) {
+    return false
+  }
+  if (event && typeof event.preventDefault === 'function') {
+    event.preventDefault()
+  }
+  const frameId = frame && (frame.frameToken || frame.frameTreeNodeId || frame.routingId)
+  if (frameId) {
+    const guardKey = `${owner.id}:${frameId}:${target.href}`
+    const now = Date.now()
+    const last = popupNavigationGuards.get(guardKey) || 0
+    popupNavigationGuards.set(guardKey, now)
+    setTimeout(() => {
+      if (popupNavigationGuards.get(guardKey) === now) {
+        popupNavigationGuards.delete(guardKey)
+      }
+    }, 1500)
+    if (now - last < 1500) {
+      return true
+    }
+  }
+  popupShellManager.openExternalWindow({ url: target.href })
+  return true
+}
 const installForceDestroyOnClose = (win) => {
   if (!win || win.__pinokioCloseHandlerInstalled) {
     return
@@ -2921,13 +2963,46 @@ const attach = (event, webContents) => {
       webContents.opened = true
     } else {
 //      console.log("will-navigate", { event, url })
-      let host = new URL(url).host
-      let localhost = new URL(root_url).host
-      if (host !== localhost) {
+      const owner = webContents.getOwnerBrowserWindow()
+      if (openNonPinokioNavigationInPopup({ event, owner, url })) {
+        return
+      }
+      const target = safeParseUrl(url, root_url || undefined)
+      if (target && !popupShellManager.isPinokioWindowUrl(target.href, root_url) && target.protocol !== 'http:' && target.protocol !== 'https:') {
         event.preventDefault()
-        shell.openExternal(url);
+        shell.openExternal(target.href)
       }
     }
+  })
+  webContents.on('will-frame-navigate', (event) => {
+    const owner = webContents.getOwnerBrowserWindow()
+    const frame = event && event.frame
+    const isDirectChildFrame = Boolean(
+      frame &&
+      webContents.mainFrame &&
+      frame.parent &&
+      !frame.parent.parent &&
+      frame.parent === webContents.mainFrame
+    )
+    if (!isDirectChildFrame) {
+      return
+    }
+    const currentUrl = (() => {
+      try {
+        return webContents.getURL()
+      } catch (_) {
+        return ''
+      }
+    })()
+    if (!isRootShellUrl(currentUrl)) {
+      return
+    }
+    openNonPinokioNavigationInPopup({
+      event,
+      owner,
+      url: event && event.url,
+      frame
+    })
   })
 //  webContents.session.defaultSession.loadExtension('path/to/unpacked/extension').then(({ id }) => {
 //  })
@@ -3092,8 +3167,6 @@ const attach = (event, webContents) => {
     let win = wc.getOwnerBrowserWindow()
     let [width, height] = win.getSize()
     let [x,y] = win.getPosition()
-    let origin = new URL(url).origin
-    console.log("config", { config, root_url, origin })
 
     // if the origin is the same as the pinokio host,
     // always open in new window
@@ -3156,28 +3229,23 @@ const attach = (event, webContents) => {
         }
       }
     } else {
-      console.log({ features, url })
-      if (features) {
-        if (features.startsWith("app") || features.startsWith("self")) {
-          return popupShellManager.createPopupResponse({ params, width, height, x, y })
-        } else if (features.startsWith("file")) {
-          let u = features.replace("file://", "")
-          shell.showItemInFolder(u)
-          return { action: 'deny' };
-        } else {
-          shell.openExternal(url);
-          return { action: 'deny' };
-        }
-      } else {
-        if (features.startsWith("file")) {
-          let u = features.replace("file://", "")
-          shell.showItemInFolder(u)
-          return { action: 'deny' };
-        } else {
-          shell.openExternal(url);
-          return { action: 'deny' };
-        }
+      if (features.startsWith("app") || features.startsWith("self")) {
+        return popupShellManager.createPopupResponse({ params, width, height, x, y })
       }
+      if (features.startsWith("file")) {
+        let u = features.replace("file://", "")
+        shell.showItemInFolder(u)
+        return { action: 'deny' };
+      }
+      const targetUrl = popupShellManager.resolveTargetUrl({
+        url,
+        openerWebContents: wc,
+        rootUrl: root_url
+      })
+      if (targetUrl) {
+        popupShellManager.openExternalWindow({ url: targetUrl })
+      }
+      return { action: 'deny' };
     }
 
 //    if (origin === root_url) {

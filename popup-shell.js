@@ -158,6 +158,7 @@ module.exports = ({
       minWidth: 190,
       backgroundColor: '#ffffff'
     })
+    win.__pinokioPopupShell = true
     installForceDestroyOnClose(win)
 
     const toolbarView = new WebContentsView({
