@@ -3087,6 +3087,7 @@ const attach = (event, webContents) => {
   webContents.setWindowOpenHandler((config) => {
     let url = config.url
     let features = config.features || ""
+    let disposition = config.disposition || ""
     let params = new URLSearchParams(features.split(",").join("&"))
     let win = wc.getOwnerBrowserWindow()
     let [width, height] = win.getSize()
@@ -3107,12 +3108,28 @@ const attach = (event, webContents) => {
         openerWebContents: wc,
         rootUrl: root_url
       })
-      if (targetUrl) loadNewWindow(targetUrl, PORT)
+      if (targetUrl) {
+        if (popupShellManager.isPinokioWindowUrl(targetUrl, root_url)) {
+          loadNewWindow(targetUrl, PORT)
+        } else {
+          popupShellManager.openExternalWindow({ url: targetUrl })
+        }
+      }
       return { action: 'deny' };
     }
 
     if (features === "browser") {
       shell.openExternal(url);
+      return { action: 'deny' };
+    } else if (disposition === "foreground-tab" || disposition === "background-tab") {
+      const targetUrl = popupShellManager.resolveTargetUrl({
+        url,
+        openerWebContents: wc,
+        rootUrl: root_url
+      })
+      if (targetUrl) {
+        popupShellManager.openExternalWindow({ url: targetUrl })
+      }
       return { action: 'deny' };
     } else if (popupShellManager.isPinokioWindowUrl(url, root_url)) {
       return {

@@ -2,8 +2,6 @@ const path = require('path')
 const windowStateKeeper = require('electron-window-state')
 const { BrowserWindow, WebContentsView, session } = require('electron')
 
-const LOCAL_PINOKIO_HOSTNAMES = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]'])
-
 const parseUrl = (value, base) => {
   try {
     return new URL(value, base)
@@ -46,14 +44,10 @@ module.exports = ({
   const isPinokioWindowUrl = (value, rootUrl) => {
     const rootParsed = parseUrl(rootUrl)
     const target = parseUrl(value, rootParsed ? rootParsed.origin : undefined)
-    if (!isHttpUrl(target)) {
+    if (!rootParsed || !isHttpUrl(target)) {
       return false
     }
-    if (rootParsed && target.origin === rootParsed.origin) {
-      return true
-    }
-    const hostname = String(target.hostname || '').toLowerCase()
-    return LOCAL_PINOKIO_HOSTNAMES.has(hostname) || hostname.endsWith('.localhost')
+    return target.origin === rootParsed.origin
   }
 
   const resolveTargetUrl = ({ url, openerWebContents, rootUrl } = {}) => {
