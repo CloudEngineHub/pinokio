@@ -88,9 +88,28 @@ module.exports = ({
     }
   }
 
+  const unwrapContainerTarget = (target, rootParsed) => {
+    let next = target
+    while (next && next.pathname === '/container') {
+      const innerUrl = next.searchParams.get('url')
+      if (!innerUrl) {
+        break
+      }
+      const unwrapped = parseUrl(innerUrl, rootParsed ? rootParsed.origin : undefined)
+      if (!isHttpUrl(unwrapped) || unwrapped.href === next.href) {
+        break
+      }
+      next = unwrapped
+    }
+    return next
+  }
+
   const isPinokioWindowUrl = (value, rootUrl) => {
     const rootParsed = parseUrl(rootUrl)
-    const target = parseUrl(value, rootParsed ? rootParsed.origin : undefined)
+    const target = unwrapContainerTarget(
+      parseUrl(value, rootParsed ? rootParsed.origin : undefined),
+      rootParsed
+    )
     if (!rootParsed || !isHttpUrl(target)) {
       return false
     }
