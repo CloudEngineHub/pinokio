@@ -25,7 +25,30 @@ module.exports = ({
   toolbarHeight = 46,
   installForceDestroyOnClose
 } = {}) => {
-  const buildPopupContentWebPreferences = (overrides = {}) => {
+  let openPinokioHomeWindow = null
+  const popupBrowserPartition = 'persist:pinokio-popup-browser'
+  const buildBrowserLikeUserAgent = () => {
+    const chromeVersion = process.versions.chrome || '140.0.0.0'
+    if (process.platform === 'darwin') {
+      return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    }
+    if (process.platform === 'win32') {
+      const arch = process.arch === 'arm64' ? 'ARM64' : 'x64'
+      return `Mozilla/5.0 (Windows NT 10.0; Win64; ${arch}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    }
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64'
+    return `Mozilla/5.0 (X11; Linux ${arch}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+  }
+  const browserLikeUserAgent = buildBrowserLikeUserAgent()
+  const getPopupBrowserSession = () => {
+    const popupSession = session.fromPartition(popupBrowserPartition)
+    if (!popupSession.__pinokioPopupBrowserConfigured) {
+      popupSession.__pinokioPopupBrowserConfigured = true
+      popupSession.setUserAgent(browserLikeUserAgent, 'en-US,en')
+    }
+    return popupSession
+  }
+  const buildAppPopupContentWebPreferences = (overrides = {}) => {
     const next = (overrides && typeof overrides === 'object') ? { ...overrides } : {}
     return {
       ...next,
@@ -38,6 +61,30 @@ module.exports = ({
       enableRemoteModule: false,
       experimentalFeatures: true,
       preload: contentPreloadPath
+    }
+  }
+  const buildBrowserPopupContentWebPreferences = (overrides = {}) => {
+    const next = (overrides && typeof overrides === 'object') ? { ...overrides } : {}
+    delete next.session
+    delete next.preload
+    delete next.partition
+    delete next.nodeIntegration
+    delete next.nodeIntegrationInSubFrames
+    delete next.contextIsolation
+    delete next.experimentalFeatures
+    delete next.webSecurity
+    return {
+      ...next,
+      partition: popupBrowserPartition,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      nativeWindowOpen: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      nodeIntegrationInSubFrames: false,
+      enableRemoteModule: false,
+      experimentalFeatures: false
     }
   }
 
@@ -73,7 +120,7 @@ module.exports = ({
       minWidth: 190,
       parent: null,
       titleBarStyle: 'hidden',
-      webPreferences: buildPopupContentWebPreferences()
+      webPreferences: buildAppPopupContentWebPreferences()
     }
     if (overlay) {
       options.titleBarOverlay = overlay
@@ -121,7 +168,9 @@ module.exports = ({
     }
     return {
       url,
-      title: title || url || 'Pinokio'
+      title: title || url || 'Pinokio',
+      canGoBack: Boolean(target && !target.isDestroyed() && target.canGoBack()),
+      canGoForward: Boolean(target && !target.isDestroyed() && target.canGoForward())
     }
   }
 
@@ -147,6 +196,7 @@ module.exports = ({
     height,
     adoptedWebContents = null,
     contentWebPreferences = {},
+    browserLike = false,
     initialUrl = ''
   } = {}) => {
     const win = new BrowserWindow({
@@ -172,7 +222,9 @@ module.exports = ({
     const contentView = adoptedWebContents
       ? new WebContentsView({ webContents: adoptedWebContents })
       : new WebContentsView({
-          webPreferences: buildPopupContentWebPreferences(contentWebPreferences)
+          webPreferences: browserLike
+            ? buildBrowserPopupContentWebPreferences(contentWebPreferences)
+            : buildAppPopupContentWebPreferences(contentWebPreferences)
         })
 
     const shellState = {
@@ -198,6 +250,37 @@ module.exports = ({
     toolbarView.webContents.on('did-finish-load', () => {
       sendPopupShellState(shellState)
     })
+    toolbarView.webContents.on('ipc-message', (_event, channel) => {
+      const target = contentView.webContents
+      if (!target || target.isDestroyed()) {
+        return
+      }
+      if (channel === 'pinokio:popup-shell-back') {
+        if (target.canGoBack()) {
+          target.goBack()
+        }
+        return
+      }
+      if (channel === 'pinokio:popup-shell-forward') {
+        if (target.canGoForward()) {
+          target.goForward()
+        }
+        return
+      }
+      if (channel === 'pinokio:popup-shell-refresh') {
+        target.reload()
+        return
+      }
+      if (channel === 'pinokio:popup-shell-open-home') {
+        if (typeof openPinokioHomeWindow === 'function') {
+          openPinokioHomeWindow()
+        }
+      }
+    })
+    if (browserLike && contentView.webContents && !contentView.webContents.isDestroyed()) {
+      getPopupBrowserSession()
+      contentView.webContents.setUserAgent(browserLikeUserAgent)
+    }
     contentView.webContents.on('did-finish-load', () => {
       syncShellState()
       focusContent()
@@ -252,6 +335,9 @@ module.exports = ({
     return {
       action: 'allow',
       outlivesOpener: true,
+      overrideBrowserWindowOptions: {
+        webPreferences: buildBrowserPopupContentWebPreferences()
+      },
       createWindow: (options = {}) => {
         const shellState = createPopupShellWindow({
           width: getFeatureDimension(params, 'width', width),
@@ -259,7 +345,8 @@ module.exports = ({
           x: x + 30,
           y: y + 30,
           adoptedWebContents: options.webContents || null,
-          contentWebPreferences: options.webPreferences || {}
+          contentWebPreferences: options.webPreferences || {},
+          browserLike: true
         })
         return shellState.contentView.webContents
       }
@@ -273,6 +360,7 @@ module.exports = ({
       y: nextWindowState.y,
       width: nextWindowState.width,
       height: nextWindowState.height,
+      browserLike: true,
       initialUrl: url
     })
     const win = shellState.win
@@ -286,6 +374,9 @@ module.exports = ({
     createPopupResponse,
     isPinokioWindowUrl,
     resolveTargetUrl,
-    openExternalWindow
+    openExternalWindow,
+    setPinokioHomeWindowOpener: (nextOpener) => {
+      openPinokioHomeWindow = typeof nextOpener === 'function' ? nextOpener : null
+    }
   }
 }

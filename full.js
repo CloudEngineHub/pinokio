@@ -3432,6 +3432,11 @@ const loadNewWindow = (url, port) => {
   winState.manage(win)
 
 }
+popupShellManager.setPinokioHomeWindowOpener(() => {
+  if (root_url && PORT) {
+    loadNewWindow(root_url, PORT)
+  }
+})
 
 
 if (process.defaultApp) {

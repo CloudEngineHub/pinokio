@@ -32,6 +32,17 @@
         padding: 8px 12px;
         box-sizing: border-box;
       }
+      .popup-toolbar__group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+      .popup-toolbar__logo {
+        width: 18px;
+        height: 18px;
+        display: block;
+      }
       .popup-toolbar__url {
         flex: 1 1 auto;
         min-width: 0;
@@ -49,17 +60,24 @@
       .popup-toolbar__button {
         flex: 0 0 auto;
         border: 0;
-        border-radius: 8px;
-        padding: 8px 12px;
-        background: #111827;
-        color: #ffffff;
+        border-radius: 6px;
+        padding: 6px 8px;
+        background: transparent;
+        color: #0f172a;
         cursor: pointer;
         font: inherit;
         font-size: 12px;
-        font-weight: 600;
+        font-weight: 500;
       }
       .popup-toolbar__button:hover {
-        background: #1f2937;
+        background: rgba(15, 23, 42, 0.06);
+      }
+      .popup-toolbar__button--icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 30px;
+        padding: 6px;
       }
       .popup-toolbar__button:disabled {
         cursor: default;
@@ -69,28 +87,56 @@
   </head>
   <body>
     <div class="popup-toolbar">
+      <div class="popup-toolbar__group">
+        <button class="popup-toolbar__button popup-toolbar__button--icon" id="open-home" type="button" title="Open Pinokio Home">
+          <img class="popup-toolbar__logo" src="./assets/icon_small.png" alt="Pinokio" />
+        </button>
+        <button class="popup-toolbar__button popup-toolbar__button--icon" id="go-back" type="button" title="Back" disabled>&larr;</button>
+        <button class="popup-toolbar__button popup-toolbar__button--icon" id="go-forward" type="button" title="Forward" disabled>&rarr;</button>
+        <button class="popup-toolbar__button popup-toolbar__button--icon" id="refresh" type="button" title="Refresh">&#8635;</button>
+      </div>
       <div class="popup-toolbar__url" id="popup-url" title="Loading...">Loading...</div>
       <button class="popup-toolbar__button" id="open-browser" type="button" disabled>Open in Browser</button>
     </div>
     <script>
       const { ipcRenderer, shell } = require('electron')
 
-      const state = { url: '' }
+      const state = { url: '', canGoBack: false, canGoForward: false }
       const urlNode = document.getElementById('popup-url')
+      const homeButton = document.getElementById('open-home')
+      const backButton = document.getElementById('go-back')
+      const forwardButton = document.getElementById('go-forward')
+      const refreshButton = document.getElementById('refresh')
       const openButton = document.getElementById('open-browser')
 
       const render = () => {
         const value = state.url || 'Loading...'
         urlNode.textContent = value
         urlNode.title = value
+        backButton.disabled = !state.canGoBack
+        forwardButton.disabled = !state.canGoForward
         openButton.disabled = !state.url
       }
 
       ipcRenderer.on('pinokio:popup-shell-state', (_event, payload = {}) => {
         state.url = typeof payload.url === 'string' ? payload.url : ''
+        state.canGoBack = Boolean(payload.canGoBack)
+        state.canGoForward = Boolean(payload.canGoForward)
         render()
       })
 
+      homeButton.addEventListener('click', () => {
+        ipcRenderer.send('pinokio:popup-shell-open-home')
+      })
+      backButton.addEventListener('click', () => {
+        ipcRenderer.send('pinokio:popup-shell-back')
+      })
+      forwardButton.addEventListener('click', () => {
+        ipcRenderer.send('pinokio:popup-shell-forward')
+      })
+      refreshButton.addEventListener('click', () => {
+        ipcRenderer.send('pinokio:popup-shell-refresh')
+      })
       openButton.addEventListener('click', () => {
         if (!state.url) {
           return
