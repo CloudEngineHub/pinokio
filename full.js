@@ -284,6 +284,32 @@ const installForceDestroyOnClose = (win) => {
 const popupShellManager = createPopupShellManager({
   installForceDestroyOnClose
 })
+const installClosePopupOnDownload = (targetSession) => {
+  if (!targetSession || targetSession.__pinokioClosePopupOnDownloadInstalled) {
+    return
+  }
+  targetSession.__pinokioClosePopupOnDownloadInstalled = true
+  targetSession.on('will-download', (_event, _item, webContents) => {
+    if (!webContents || typeof webContents.getOwnerBrowserWindow !== 'function') {
+      return
+    }
+    let owner = null
+    try {
+      owner = webContents.getOwnerBrowserWindow()
+    } catch (_) {
+      owner = null
+    }
+    if (!owner || owner.isDestroyed?.() || !owner.__pinokioCloseOnFirstDownload) {
+      return
+    }
+    owner.__pinokioCloseOnFirstDownload = false
+    setTimeout(() => {
+      if (!owner.isDestroyed()) {
+        owner.close()
+      }
+    }, 0)
+  })
+}
 const resolveConsoleSourceUrl = (sourceId, pageUrl) => {
   const page = safeParseUrl(pageUrl)
   const source = safeParseUrl(sourceId, page ? page.href : undefined)
@@ -3495,6 +3521,8 @@ if (!gotTheLock) {
     installInspectorHandlers()
     installInjectorHandlers()
     installPermissionHandlers()
+    installClosePopupOnDownload(session.defaultSession)
+    installClosePopupOnDownload(popupShellManager.getPopupBrowserSession())
 
     ipcMain.on('pinokio:update-banner-action', (_event, payload = {}) => {
       const action = payload && payload.action

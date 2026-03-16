@@ -228,6 +228,7 @@ module.exports = ({
       backgroundColor: '#ffffff'
     })
     win.__pinokioPopupShell = true
+    win.__pinokioCloseOnFirstDownload = Boolean(browserLike && initialUrl)
     installForceDestroyOnClose(win)
 
     const toolbarView = new WebContentsView({
@@ -301,6 +302,9 @@ module.exports = ({
       contentView.webContents.setUserAgent(browserLikeUserAgent)
     }
     contentView.webContents.on('did-finish-load', () => {
+      if (shellState.win && !shellState.win.isDestroyed()) {
+        shellState.win.__pinokioCloseOnFirstDownload = false
+      }
       syncShellState()
       focusContent()
     })
@@ -391,6 +395,7 @@ module.exports = ({
 
   return {
     createPopupResponse,
+    getPopupBrowserSession,
     isPinokioWindowUrl,
     resolveTargetUrl,
     openExternalWindow,
