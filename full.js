@@ -30,7 +30,7 @@ const updateTestMode = (() => {
 })()
 let updateTestInterval = null
 let updateTestTimeout = null
-const UPDATE_RELEASES_URL = 'https://github.com/peanutcocktail/pinokio/releases'
+const UPDATE_RELEASES_URL = 'https://github.com/pinokiocomputer/pinokio/releases'
 const setWindowTitleBarOverlay = (win, overlay) => {
   if (!win || !win.setTitleBarOverlay) {
     return
