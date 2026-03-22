@@ -239,6 +239,36 @@ const getHttpNavigationTarget = (value, base) => {
   }
   return target
 }
+const resolveNavigationTarget = ({ url, openerWebContents, baseUrl } = {}) => {
+  const openerUrl = (() => {
+    if (typeof baseUrl === 'string' && baseUrl) {
+      return baseUrl
+    }
+    try {
+      return openerWebContents && !openerWebContents.isDestroyed()
+        ? openerWebContents.getURL()
+        : (root_url || '')
+    } catch (_) {
+      return root_url || ''
+    }
+  })()
+  return getHttpNavigationTarget(url, openerUrl || (root_url || undefined))
+}
+const openHttpsInBrowser = ({ event, url, openerWebContents, baseUrl } = {}) => {
+  const target = resolveNavigationTarget({ url, openerWebContents, baseUrl })
+  if (target?.protocol !== 'https:') {
+    return false
+  }
+  event?.preventDefault?.()
+  shell.openExternal(target.href).catch(() => {})
+  return true
+}
+const openPopupShellHttpsNavigationInBrowser = ({ event, owner, url, openerWebContents, baseUrl } = {}) => {
+  if (!owner?.__pinokioPopupShell) {
+    return false
+  }
+  return openHttpsInBrowser({ event, url, openerWebContents, baseUrl })
+}
 const openNonPinokioNavigationInPopup = ({ event, owner, url, frame } = {}) => {
   const target = getHttpNavigationTarget(url, root_url || undefined)
   if (!target || !owner || owner.isDestroyed?.() || owner.__pinokioPopupShell) {
@@ -2805,6 +2835,9 @@ const buildBrowserContextMenuTemplate = (webContents, params = {}) => {
   const canSuggestSpelling = Array.isArray(params.dictionarySuggestions) && params.dictionarySuggestions.length > 0
   const hasMisspelledWord = typeof params.misspelledWord === 'string' && params.misspelledWord.length > 0
   const owner = webContents && !webContents.isDestroyed() ? webContents.getOwnerBrowserWindow() : null
+  const baseUrl = typeof params.frameURL === 'string' && params.frameURL
+    ? params.frameURL
+    : (typeof params.pageURL === 'string' ? params.pageURL : '')
   const canGoBack = Boolean(webContents && webContents.canGoBack && webContents.canGoBack())
   const canGoForward = Boolean(webContents && webContents.canGoForward && webContents.canGoForward())
 
@@ -2814,6 +2847,9 @@ const buildBrowserContextMenuTemplate = (webContents, params = {}) => {
       click: () => {
         try {
           if (typeof loadNewWindow === 'function' && PORT) {
+            if (openHttpsInBrowser({ url: linkURL, openerWebContents: webContents, baseUrl })) {
+              return
+            }
             if (popupShellManager.isPinokioWindowUrl(linkURL, root_url)) {
               loadNewWindow(linkURL, PORT)
             } else {
@@ -3049,6 +3085,9 @@ const attach = (event, webContents) => {
     } else {
 //      console.log("will-navigate", { event, url })
       const owner = webContents.getOwnerBrowserWindow()
+      if (openPopupShellHttpsNavigationInBrowser({ event, owner, url })) {
+        return
+      }
       if (openNonPinokioNavigationInPopup({ event, owner, url })) {
         return
       }
@@ -3248,10 +3287,15 @@ const attach = (event, webContents) => {
     let url = config.url
     let features = config.features || ""
     let disposition = config.disposition || ""
+    let referrerUrl = config.referrer && typeof config.referrer.url === 'string' ? config.referrer.url : ''
     let params = new URLSearchParams(features.split(",").join("&"))
     let win = wc.getOwnerBrowserWindow()
     let [width, height] = win.getSize()
     let [x,y] = win.getPosition()
+
+    if (openHttpsInBrowser({ url, openerWebContents: wc, baseUrl: referrerUrl })) {
+      return { action: 'deny' };
+    }
 
     // if the origin is the same as the pinokio host,
     // always open in new window
