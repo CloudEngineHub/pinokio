@@ -285,7 +285,7 @@ const popupShellManager = createPopupShellManager({
   installForceDestroyOnClose
 })
 const normalizeOpenSurface = (value) => {
-  return String(value || '').trim().toLowerCase() === 'popup' ? 'popup' : 'browser'
+  return String(value || '').trim().toLowerCase() === 'browser' ? 'browser' : 'popup'
 }
 const normalizePopupPreset = (value) => {
   const normalized = String(value || '').trim().toLowerCase()
