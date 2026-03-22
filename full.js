@@ -284,6 +284,65 @@ const installForceDestroyOnClose = (win) => {
 const popupShellManager = createPopupShellManager({
   installForceDestroyOnClose
 })
+const normalizeOpenSurface = (value) => {
+  return String(value || '').trim().toLowerCase() === 'popup' ? 'popup' : 'browser'
+}
+const normalizePopupPreset = (value) => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'center-small' || normalized === 'center-medium' || normalized === 'center-large' || normalized === 'fullscreen') {
+    return normalized
+  }
+  return 'center-medium'
+}
+const clampDimension = (value, min, max) => {
+  const boundedMax = Math.max(min, max)
+  return Math.max(min, Math.min(value, boundedMax))
+}
+const buildPopupWindowState = ({ preset } = {}) => {
+  const resolvedPreset = normalizePopupPreset(preset)
+  const point = (() => {
+    try {
+      return screen.getCursorScreenPoint()
+    } catch (_) {
+      return { x: 0, y: 0 }
+    }
+  })()
+  const display = screen.getDisplayNearestPoint(point) || screen.getPrimaryDisplay()
+  const workArea = display && display.workArea
+    ? display.workArea
+    : { x: 0, y: 0, width: 1280, height: 800 }
+  let width = 960
+  let height = 720
+  if (resolvedPreset === 'center-small') {
+    width = clampDimension(Math.round(workArea.width * 0.42), 640, workArea.width)
+    height = clampDimension(Math.round(workArea.height * 0.52), 480, workArea.height)
+  } else if (resolvedPreset === 'center-large') {
+    width = clampDimension(Math.round(workArea.width * 0.82), 1100, workArea.width)
+    height = clampDimension(Math.round(workArea.height * 0.86), 820, workArea.height)
+  } else if (resolvedPreset === 'fullscreen') {
+    width = workArea.width
+    height = workArea.height
+  } else {
+    width = clampDimension(Math.round(workArea.width * 0.64), 900, workArea.width)
+    height = clampDimension(Math.round(workArea.height * 0.72), 700, workArea.height)
+  }
+  const x = resolvedPreset === 'fullscreen'
+    ? workArea.x
+    : workArea.x + Math.max(Math.round((workArea.width - width) / 2), 0)
+  const y = resolvedPreset === 'fullscreen'
+    ? workArea.y
+    : workArea.y + Math.max(Math.round((workArea.height - height) / 2), 0)
+  return {
+    preset: resolvedPreset,
+    windowState: {
+      x,
+      y,
+      width,
+      height,
+      manage: () => {}
+    }
+  }
+}
 const installClosePopupOnDownload = (targetSession) => {
   if (!targetSession || targetSession.__pinokioClosePopupOnDownloadInstalled) {
     return
@@ -3704,6 +3763,30 @@ document.querySelector("form").addEventListener("submit", (e) => {
             await clearPersistedSessionCookies()
 
             console.log("cleared all sessions")
+          },
+          open: async (payload = {}) => {
+            const url = typeof payload.url === 'string' ? payload.url.trim() : ''
+            if (!url) {
+              return { ok: false, error: 'missing-url', surface_used: 'browser' }
+            }
+            const surface = normalizeOpenSurface(payload.surface)
+            if (surface === 'popup') {
+              const popupState = buildPopupWindowState({ preset: payload.preset })
+              popupShellManager.openExternalWindow({
+                url,
+                windowState: popupState.windowState
+              })
+              return {
+                ok: true,
+                surface_used: 'popup',
+                preset_used: popupState.preset
+              }
+            }
+            await Promise.resolve(shell.openExternal(url))
+            return {
+              ok: true,
+              surface_used: 'browser'
+            }
           },
           requestPermissions: async (payload = {}) => {
             try {

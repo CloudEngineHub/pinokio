@@ -162,6 +162,17 @@ app.whenReady().then(async () => {
           console.log('clear cache', session.defaultSession)
           await session.defaultSession.clearStorageData()
           console.log("cleared")
+        },
+        open: async (payload = {}) => {
+          const url = typeof payload.url === 'string' ? payload.url.trim() : ''
+          if (!url) {
+            return { ok: false, error: 'missing-url', surface_used: 'browser' }
+          }
+          await Promise.resolve(shell.openExternal(url))
+          return {
+            ok: true,
+            surface_used: 'browser'
+          }
         }
       }
     })
