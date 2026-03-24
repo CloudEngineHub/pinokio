@@ -269,6 +269,16 @@ const openPopupShellHttpsNavigationInBrowser = ({ event, owner, url, openerWebCo
   }
   return openHttpsInBrowser({ event, url, openerWebContents, baseUrl })
 }
+const readFrameFieldSafely = (frame, field) => {
+  if (!frame) {
+    return undefined
+  }
+  try {
+    return frame[field]
+  } catch (_) {
+    return undefined
+  }
+}
 const openNonPinokioNavigationInPopup = ({ event, owner, url, frame } = {}) => {
   const target = getHttpNavigationTarget(url, root_url || undefined)
   if (!target || !owner || owner.isDestroyed?.() || owner.__pinokioPopupShell) {
@@ -280,7 +290,9 @@ const openNonPinokioNavigationInPopup = ({ event, owner, url, frame } = {}) => {
   if (event && typeof event.preventDefault === 'function') {
     event.preventDefault()
   }
-  const frameId = frame && (frame.frameToken || frame.frameTreeNodeId || frame.routingId)
+  const frameId = readFrameFieldSafely(frame, 'frameToken')
+    || readFrameFieldSafely(frame, 'frameTreeNodeId')
+    || readFrameFieldSafely(frame, 'routingId')
   if (frameId) {
     const guardKey = `${owner.id}:${frameId}:${target.href}`
     const now = Date.now()
@@ -3101,12 +3113,14 @@ const attach = (event, webContents) => {
   webContents.on('will-frame-navigate', (event) => {
     const owner = webContents.getOwnerBrowserWindow()
     const frame = event && event.frame
+    const parentFrame = readFrameFieldSafely(frame, 'parent')
+    const grandparentFrame = readFrameFieldSafely(parentFrame, 'parent')
     const isDirectChildFrame = Boolean(
       frame &&
       webContents.mainFrame &&
-      frame.parent &&
-      !frame.parent.parent &&
-      frame.parent === webContents.mainFrame
+      parentFrame &&
+      !grandparentFrame &&
+      parentFrame === webContents.mainFrame
     )
     if (!isDirectChildFrame) {
       return
